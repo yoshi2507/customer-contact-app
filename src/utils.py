@@ -140,6 +140,9 @@ def add_docs(folder_path, docs_all):
         folder_path: フォルダのパス
         docs_all: 各ファイルデータを格納するリスト
     """
+    print(f"📂 読み込もうとしているフォルダ: {folder_path}")
+    print(f"📂 フルパス: {os.path.abspath(folder_path)}")
+    
     files = os.listdir(folder_path)
     for file in files:
         # ファイルの拡張子を取得
@@ -207,6 +210,78 @@ def run_customer_doc_chain(param):
 
     return ai_msg["answer"]
 
+def run_manual_doc_chain(param):
+    """
+    操作マニュアルや手順書に関するデータ参照に特化したTool設定用の関数
+
+    Args:
+        param: ユーザー入力値
+
+    Returns:
+        LLMからの回答
+    """
+    # RAG chainを使って回答を生成
+    ai_msg = st.session_state.manual_doc_chain.invoke({
+        "input": param,
+        "chat_history": st.session_state.chat_history
+    })
+
+    # 会話履歴に記録（オプション）
+    st.session_state.chat_history.extend([
+        HumanMessage(content=param),
+        AIMessage(content=ai_msg["answer"])
+    ])
+
+    return ai_msg["answer"]
+
+def run_policy_doc_chain(param):
+    """
+    利用規約・キャンセル・返品などの制度・ポリシーに関するデータ参照に特化したTool設定用の関数
+
+    Args:
+        param: ユーザー入力値
+
+    Returns:
+        LLMからの回答
+    """
+    # RAG chainを使って回答を生成
+    ai_msg = st.session_state.policy_doc_chain.invoke({
+        "input": param,
+        "chat_history": st.session_state.chat_history
+    })
+
+    # 会話履歴に記録（オプション）
+    st.session_state.chat_history.extend([
+        HumanMessage(content=param),
+        AIMessage(content=ai_msg["answer"])
+    ])
+
+    return ai_msg["answer"]
+
+
+def run_sustainability_doc_chain(param):
+    """
+    環境・サステナビリティ・エシカル活動に関するデータ参照に特化したTool設定用の関数
+
+    Args:
+        param: ユーザー入力値
+
+    Returns:
+        LLMからの回答
+    """
+    # RAG chainを使って回答を生成
+    ai_msg = st.session_state.sustainability_doc_chain.invoke({
+        "input": param,
+        "chat_history": st.session_state.chat_history
+    })
+
+    # 会話履歴に記録（オプション）
+    st.session_state.chat_history.extend([
+        HumanMessage(content=param),
+        AIMessage(content=ai_msg["answer"])
+    ])
+
+    return ai_msg["answer"]
 
 def delete_old_conversation_log(result):
     """

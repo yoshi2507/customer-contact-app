@@ -96,11 +96,17 @@ AI_AGENT_MAX_ITERATIONS = 5
 
 DB_SERVICE_PATH = "./.db_service"
 DB_CUSTOMER_PATH = "./.db_customer"
+DB_MANUAL_PATH = "./.db_manual"
+DB_POLICY_PATH = "./.db_policy"
+DB_SUSTAINABILITY_PATH = "./.db_sustainability"
 
 DB_NAMES = {
     DB_COMPANY_PATH: f"{RAG_TOP_FOLDER_PATH}/company",
     DB_SERVICE_PATH: f"{RAG_TOP_FOLDER_PATH}/service",
-    DB_CUSTOMER_PATH: f"{RAG_TOP_FOLDER_PATH}/customer"
+    DB_CUSTOMER_PATH: f"{RAG_TOP_FOLDER_PATH}/customer",
+    DB_MANUAL_PATH: f"{RAG_TOP_FOLDER_PATH}/manual",
+    DB_POLICY_PATH: f"{RAG_TOP_FOLDER_PATH}/policy",
+    DB_SUSTAINABILITY_PATH: f"{RAG_TOP_FOLDER_PATH}/sustainability"
 }
 
 AI_AGENT_MODE_ON = "利用する"
@@ -110,15 +116,50 @@ CONTACT_MODE_ON = "ON"
 CONTACT_MODE_OFF = "OFF"
 
 SEARCH_COMPANY_INFO_TOOL_NAME = "search_company_info_tool"
-SEARCH_COMPANY_INFO_TOOL_DESCRIPTION = "自社「株式会社EcoTee」に関する情報を参照したい時に使う"
+SEARCH_COMPANY_INFO_TOOL_DESCRIPTION = (
+    "EcoTee社の企業情報、理念、組織、実績、株主優待制度などに関する質問に使用します。\n"
+    "たとえば『EcoTeeってどんな会社？』『株主優待はある？』『どこに本社があるの？』『受賞歴を教えて』などの質問で使用されます。\n"
+    "このToolは、会社の設立概要、代表者、事業内容、サステナビリティ方針、販売実績、株主向けの優待プランやイベント、連絡先情報などを含む文書を参照して回答します。\n"
+    "※ サービスの使い方や商品仕様に関する質問は 'search_service_info_tool' や 'search_manual_info_tool' が適切です。"
+)
 SEARCH_SERVICE_INFO_TOOL_NAME = "search_service_info_tool"
-SEARCH_SERVICE_INFO_TOOL_DESCRIPTION = "自社サービス「EcoTee」に関する情報を参照したい時に使う"
+SEARCH_SERVICE_INFO_TOOL_DESCRIPTION = (
+    "EcoTee社が提供するTシャツ関連サービスや製品内容に関する質問に使用します。\n"
+    "たとえば『EcoTeeの主要サービスを教えて』『法人向けプランはある？』『代行出荷って何？』『プレミアムTシャツの特徴は？』などの質問で使用されます。\n"
+    "このToolは、サービス紹介・製品情報・カスタマイズ内容・素材の特徴・出荷オプション・価格帯など、製品/サービスの特徴に関する資料を参照して回答します。\n"
+    "操作方法や注文手続き、FAQに関する質問は 'search_manual_info_tool' が適切です。"
+)
 SEARCH_CUSTOMER_COMMUNICATION_INFO_TOOL_NAME = "search_customer_communication_tool"
-SEARCH_CUSTOMER_COMMUNICATION_INFO_TOOL_DESCRIPTION = "顧客とのやりとりに関する情報を参照したい時に使う"
+SEARCH_CUSTOMER_COMMUNICATION_INFO_TOOL_DESCRIPTION = (
+    "EcoTeeのお客様（例：佐藤花子さん）に関する行動履歴、購入傾向、問い合わせ内容、満足度、キャンペーン参加状況などに関する質問に使用します。\n"
+    "たとえば『佐藤花子さんの購入履歴を教えて』『過去にどんな問い合わせがあった？』『エンゲージメントの評価は？』『どんな商品に興味がありそう？』などの質問で使用されます。\n"
+    "このToolは、顧客のプロフィール、注文履歴、来店記録、サポート履歴、アンケート結果、SNS投稿履歴、会員ランク、ロイヤリティ情報、社内CRMスコアなどに基づいて回答します。\n"
+    "※ 会社やサービスの一般的な特徴に関する質問は 'search_company_info_tool' や 'search_service_info_tool' が適切です。"
+)
 SEARCH_WEB_INFO_TOOL_NAME = "search_web_tool"
 SEARCH_WEB_INFO_TOOL_DESCRIPTION = "自社サービス「HealthX」に関する質問で、Web検索が必要と判断した場合に使う"
 
-
+SEARCH_MANUAL_INFO_TOOL_NAME = "search_manual_info_tool"
+SEARCH_MANUAL_INFO_TOOL_DESCRIPTION = (
+    "EcoTee Creatorの操作方法、注文手続き、FAQ、トラブル対応などのマニュアル資料に関する質問に使用します。\n"
+    "たとえば『デザインツールの使い方を教えて』『注文の途中で止めた場合はどうなる？』『配送先を分けて送るには？』などの質問で使用されます。\n"
+    "このToolは、操作ガイド・設定手順・FAQなどに基づいて回答します。\n"
+    "このToolは、サービスの特徴や料金などを答える 'search_service_info_tool' とは異なり、具体的な『使い方』に特化しています。"
+)
+SEARCH_POLICY_INFO_TOOL_NAME = "search_policy_info_tool"
+SEARCH_POLICY_INFO_TOOL_DESCRIPTION = (
+    "EcoTeeの注文ルール、支払い方法、発送条件、返品・交換、定期購入、法人向け対応などの「利用規約・制度」に関する質問に使用します。\n"
+    "たとえば『返品はいつまで可能ですか？』『定期購入の解約ルールを教えて』『海外配送は対応していますか？』『法人注文の特典は？』などの質問で使用されます。\n"
+    "このToolは、キャンセルや変更の条件、梱包・ギフト対応、顧客サポート方針、サブスクリプション契約、特急配送のルール、CO2オフセットオプションなどを含む「サービス提供に関する各種規定資料」を参照して回答します。\n"
+    "※ 操作方法や商品仕様に関する質問は 'search_manual_info_tool' や 'search_service_info_tool' が適切です。"
+)
+SEARCH_SUSTAINABILITY_INFO_TOOL_NAME = "search_sustainability_info_tool"
+SEARCH_SUSTAINABILITY_INFO_TOOL_DESCRIPTION = (
+    "EcoTee社の環境対策・サステナビリティ活動・リサイクル方針・エシカルな労働環境・地域貢献などに関する質問に使用します。\n"
+    "たとえば『製造時のCO2排出はどう抑えている？』『再生可能エネルギーは活用している？』『リサイクルTシャツの仕組みは？』『GOTS認証は取得していますか？』『労働環境の取り組みは？』などの質問で使用されます。\n"
+    "このToolは、素材選定方針、ゼロウェイスト設計、再生エネルギー利用、カーボンオフセットプログラム、地域貢献活動、環境認証、エシカル労働支援、未来目標など、EcoTeeの環境・倫理的な取り組みに関する資料を参照して回答します。\n"
+    "※ 会社全体の基本情報や、サービス・商品の仕様に関する質問は 'search_company_info_tool' や 'search_service_info_tool' が適切です。"
+)
 # ==========================================
 # Slack連携関連
 # ==========================================
