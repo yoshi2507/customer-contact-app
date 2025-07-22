@@ -132,6 +132,7 @@ def create_rag_chain(db_name):
     return rag_chain
 
 
+
 def add_docs(folder_path, docs_all):
     """
     フォルダ内のファイル一覧を取得
@@ -142,7 +143,7 @@ def add_docs(folder_path, docs_all):
     """
     print(f"📂 読み込もうとしているフォルダ: {folder_path}")
     print(f"📂 フルパス: {os.path.abspath(folder_path)}")
-    
+
     files = os.listdir(folder_path)
     for file in files:
         # ファイルの拡張子を取得
@@ -640,3 +641,75 @@ def adjust_string(s):
     
     # OSがWindows以外の場合はそのまま返す
     return s
+
+def debug_retriever_output(query, retriever):
+    """
+    指定されたクエリに対して、retrieverが返すchunkとscoreを表示するデバッグ用関数
+
+    Args:
+        query: ユーザーからの質問
+        retriever: LangChainのretrieverオブジェクト
+
+    Returns:
+        なし（コンソール出力）
+    """
+    print("\n" + "=" * 80)
+    print(f"🔍 質問: {query}")
+    print("=" * 80)
+    
+    try:
+        results = retriever.vectorstore.similarity_search_with_score(query, k=5)
+        for i, (doc, score) in enumerate(results):
+            print(f"[{i+1}] Score: {score:.4f}")
+            print(f"Chunk Preview: {doc.page_content[:200]}...\n")
+    except Exception as e:
+        print("❌ スコア付き取得に失敗しました:", e)
+        print("🔁 fallback: get_relevant_documents() で出力を試みます")
+        docs = retriever.get_relevant_documents(query)
+        for i, doc in enumerate(docs):
+            print(f"[{i+1}] Score: N/A")
+            print(f"Chunk Preview: {doc.page_content[:200]}...\n")
+
+def create_retriever(db_name):
+    """
+    指定されたDBパスに基づいてRetrieverのみを作成
+
+    Args:
+        db_name: ベクトルDBの保存先ディレクトリ名（または定義名）
+
+    Returns:
+        LangChainのRetrieverオブジェクト
+    """
+    logger = logging.getLogger(ct.LOGGER_NAME)
+
+    docs_all = []
+    if db_name == ct.DB_ALL_PATH:
+        folders = os.listdir(ct.RAG_TOP_FOLDER_PATH)
+        for folder_path in folders:
+            if folder_path.startswith("."):
+                continue
+            add_docs(f"{ct.RAG_TOP_FOLDER_PATH}/{folder_path}", docs_all)
+    else:
+        folder_path = ct.DB_NAMES[db_name]
+        add_docs(folder_path, docs_all)
+
+    for doc in docs_all:
+        doc.page_content = adjust_string(doc.page_content)
+        for key in doc.metadata:
+            doc.metadata[key] = adjust_string(doc.metadata[key])
+
+    text_splitter = CharacterTextSplitter(
+        chunk_size=ct.CHUNK_SIZE,
+        chunk_overlap=ct.CHUNK_OVERLAP,
+        separator="\n",
+    )
+    splitted_docs = text_splitter.split_documents(docs_all)
+    embeddings = OpenAIEmbeddings()
+
+    if os.path.isdir(db_name):
+        db = Chroma(persist_directory=".db", embedding_function=embeddings)
+    else:
+        db = Chroma.from_documents(splitted_docs, embedding=embeddings, persist_directory=".db")
+
+    retriever = db.as_retriever(search_kwargs={"k": ct.TOP_K})
+    return retriever

@@ -66,6 +66,8 @@ def initialize_session_state():
         st.session_state.dissatisfied_reason = ""
         # フィードバック送信後にThanksメッセージを表示するためのフラグ
         st.session_state.feedback_no_reason_send_flg = False
+        # Retrieverデバッグモード（任意でON/OFF切り替え）
+        st.session_state.retriever_debug_mode = True
 
 
 def initialize_session_id():
@@ -122,7 +124,20 @@ def initialize_agent_executor():
     st.session_state.manual_doc_chain = utils.create_rag_chain(ct.DB_MANUAL_PATH)
     st.session_state.policy_doc_chain = utils.create_rag_chain(ct.DB_POLICY_PATH)
     st.session_state.sustainability_doc_chain = utils.create_rag_chain(ct.DB_SUSTAINABILITY_PATH)
+    retriever = utils.create_retriever(ct.DB_ALL_PATH)
     st.session_state.rag_chain = utils.create_rag_chain(ct.DB_ALL_PATH)
+
+    # ✅ RetrieverデバッグモードがONかつ未実行の場合、一度だけ実行
+    if st.session_state.get("retriever_debug_mode") and not st.session_state.get("retriever_debug_done"):
+        test_queries = [
+            "SNS投稿に関する特典はありますか？",
+            "海外配送は対応していますか？",
+            "地域貢献活動はありますか？",
+            "受賞歴を教えてください"
+        ]
+        for query in test_queries:
+            utils.debug_retriever_output(query, retriever)
+        st.session_state.retriever_debug_done = True
 
     # Web検索用のToolを設定するためのオブジェクトを用意
     search = SerpAPIWrapper()
