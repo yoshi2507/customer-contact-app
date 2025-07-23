@@ -133,7 +133,8 @@ def initialize_agent_executor():
             "SNS投稿に関する特典はありますか？",
             "海外配送は対応していますか？",
             "地域貢献活動はありますか？",
-            "受賞歴を教えてください"
+            "受賞歴を教えてください",
+            "EcoTeeは地域社会への貢献活動をしていますか？"
         ]
         for query in test_queries:
             utils.debug_retriever_output(query, retriever)

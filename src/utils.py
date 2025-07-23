@@ -32,7 +32,9 @@ from langchain.output_parsers import CommaSeparatedListOutputParser
 from langchain import LLMChain
 import datetime
 import constants as ct
-
+from pathlib import Path
+from collections import Counter
+# from langchain.text_splitter import RecursiveCharacterTextSplitter as RegexTextSplitter
 
 ############################################################
 # 設定関連
@@ -89,12 +91,32 @@ def create_rag_chain(db_name):
         for key in doc.metadata:
             doc.metadata[key] = adjust_string(doc.metadata[key])
     
+    #text_splitter = RegexTextSplitter(
+    #separators=["\n\n", "\n", "● ", "○ ", "■ ", "【", "】", ".", "。", " "],
+    #chunk_size=ct.CHUNK_SIZE,
+    #chunk_overlap=ct.CHUNK_OVERLAP,
+    #)
     text_splitter = CharacterTextSplitter(
         chunk_size=ct.CHUNK_SIZE,
         chunk_overlap=ct.CHUNK_OVERLAP,
         separator="\n",
     )
     splitted_docs = text_splitter.split_documents(docs_all)
+    # ✅ チャンク先頭にメタ情報を付加（retrieverと同じ処理）
+    for doc in splitted_docs:
+        file_name = doc.metadata.get("file_name", "不明")
+        category = doc.metadata.get("category", "不明")
+        heading = doc.metadata.get("first_heading", "")
+        keywords = doc.metadata.get("top_keywords", [])
+        keyword_str = "/".join(keywords) if keywords else ""
+
+        prefix = f"【カテゴリ: {category}】【ファイル名: {file_name}】"
+        if heading:
+            prefix += f"【見出し: {heading}】"
+        if keyword_str:
+            prefix += f"【キーワード: {keyword_str}】"
+
+        doc.page_content = prefix + "\n" + doc.page_content
 
     embeddings = OpenAIEmbeddings()
 
@@ -146,6 +168,7 @@ def add_docs(folder_path, docs_all):
 
     files = os.listdir(folder_path)
     for file in files:
+        file_path = os.path.join(folder_path, file)
         # ファイルの拡張子を取得
         file_extension = os.path.splitext(file)[1]
         # 想定していたファイル形式の場合のみ読み込む
@@ -154,7 +177,67 @@ def add_docs(folder_path, docs_all):
             loader = ct.SUPPORTED_EXTENSIONS[file_extension](f"{folder_path}/{file}")
         else:
             continue
+
         docs = loader.load()
+        p = Path(file_path)
+
+        for doc in docs:
+            content = doc.page_content
+
+            # 📌 基本メタ情報
+            doc.metadata["file_name"] = p.name
+            doc.metadata["file_stem"] = p.stem
+            doc.metadata["file_ext"] = p.suffix
+            doc.metadata["file_path"] = str(p)
+            doc.metadata["category"] = p.parent.name
+            doc.metadata["file_mtime"] = datetime.datetime.fromtimestamp(p.stat().st_mtime).isoformat()
+            doc.metadata["file_ctime"] = datetime.datetime.fromtimestamp(p.stat().st_ctime).isoformat()
+
+            # 🧑‍💻 作成者（docxの場合のみ取得可能な場合あり）
+            if p.suffix == ".docx":
+                try:
+                    from docx import Document as DocxDocument
+                    core_props = DocxDocument(p).core_properties
+                    doc.metadata["file_author"] = core_props.author
+                except Exception:
+                    doc.metadata["file_author"] = "不明"
+            else:
+                doc.metadata["file_author"] = "不明"
+
+            # 🧩 セクション見出し
+            section_titles = []
+            for line in content.splitlines():
+                if line.strip().startswith(("■", "●", "○", "【", "▶", "◇", "◆")):
+                    section_titles.append(line.strip())
+            doc.metadata["section_titles"] = " / ".join(section_titles)
+            doc.metadata["first_heading"] = section_titles[0] if section_titles else ""
+            doc.metadata["section_count"] = len(section_titles)
+
+            # 🧠 頻出キーワード（名詞のみ）
+            tokenizer_obj = dictionary.Dictionary().create()
+            mode = tokenizer.Tokenizer.SplitMode.C
+            tokens = tokenizer_obj.tokenize(content, mode)
+            nouns = [
+                t.surface() 
+                for t in tokens
+                if "名詞" in t.part_of_speech() and len(t.surface()) > 1
+            ]
+            top_keywords = [
+                word 
+                for word, _ in Counter(
+                    t.surface()
+                    for t in tokenizer_obj.tokenize(content, tokenizer.Tokenizer.SplitMode.C)
+                    if "名詞" in t.part_of_speech() and len(t.surface()) > 1
+                ).most_common(5)
+        ]
+            doc.metadata["top_keywords"] = " / ".join(top_keywords)
+            # デバッグ用に出力
+            print(f"🔑 抽出キーワード: {top_keywords}")
+
+            # ✏️ 文字数・行数など（追加で役立つ）
+            doc.metadata["num_chars"] = len(content)
+            doc.metadata["num_lines"] = len(content.splitlines())
+
         docs_all.extend(docs)
 
 
@@ -656,7 +739,7 @@ def debug_retriever_output(query, retriever):
     print("\n" + "=" * 80)
     print(f"🔍 質問: {query}")
     print("=" * 80)
-    
+
     try:
         results = retriever.vectorstore.similarity_search_with_score(query, k=5)
         for i, (doc, score) in enumerate(results):
@@ -698,6 +781,11 @@ def create_retriever(db_name):
         for key in doc.metadata:
             doc.metadata[key] = adjust_string(doc.metadata[key])
 
+    #text_splitter = RegexTextSplitter(
+    #separators=["\n\n", "\n", "● ", "○ ", "■ ", "【", "】", ".", "。", " "],
+    #chunk_size=ct.CHUNK_SIZE,
+    #chunk_overlap=ct.CHUNK_OVERLAP,
+    #)
     text_splitter = CharacterTextSplitter(
         chunk_size=ct.CHUNK_SIZE,
         chunk_overlap=ct.CHUNK_OVERLAP,
@@ -705,6 +793,23 @@ def create_retriever(db_name):
     )
     splitted_docs = text_splitter.split_documents(docs_all)
     embeddings = OpenAIEmbeddings()
+
+    # チャンク先頭にメタ情報を付加
+    for doc in splitted_docs:
+        file_name = doc.metadata.get("file_name", "不明")
+        category = doc.metadata.get("category", "不明")
+        heading = doc.metadata.get("first_heading", "")
+        keywords = doc.metadata.get("top_keywords", [])
+        keyword_str = "/".join(keywords) if keywords else ""
+
+        # メタ情報を1行目に構造化（お好みで調整可能）
+        prefix = f"【カテゴリ: {category}】【ファイル名: {file_name}】"
+        if heading:
+            prefix += f"【見出し: {heading}】"
+        if keyword_str:
+            prefix += f"【キーワード: {keyword_str}】"
+
+        doc.page_content = prefix + "\n" + doc.page_content
 
     if os.path.isdir(db_name):
         db = Chroma(persist_directory=".db", embedding_function=embeddings)
