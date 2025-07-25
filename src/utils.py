@@ -37,6 +37,22 @@ from collections import Counter
 from langchain.schema.document import Document
 # from langchain.text_splitter import RecursiveCharacterTextSplitter as RegexTextSplitter
 
+# ============================================================================
+# 同義語辞書（必要に応じて拡張可能）
+# ============================================================================
+
+SYNONYM_DICT = {
+    "受賞": ["受賞歴", "表彰", "アワード", "賞", "栄誉"],
+    "実績": ["成果", "業績", "結果", "成績"],
+    "会社": ["企業", "法人", "組織", "事業者"],
+    "環境": ["エコ", "グリーン", "サステナブル", "持続可能"],
+    "製品": ["商品", "サービス", "プロダクト"],
+    "顧客": ["お客様", "利用者", "ユーザー", "クライアント"],
+    "料金": ["価格", "費用", "コスト", "値段", "金額"],
+    "配送": ["発送", "配達", "お届け", "輸送"],
+    "注文": ["オーダー", "発注", "購入", "申込"]
+}
+
 ############################################################
 # 設定関連
 ############################################################
@@ -59,6 +75,140 @@ def build_error_message(message):
     """
     return "\n".join([message, ct.COMMON_ERROR_MESSAGE])
 
+def expand_keywords_with_synonyms(keywords: List[str]) -> List[str]:
+    """
+    キーワードリストに同義語を追加して拡張
+    
+    Args:
+        keywords: 元のキーワードリスト（例: ["受賞歴"]）
+        
+    Returns:
+        同義語を含む拡張されたキーワードリスト（例: ["受賞歴", "受賞", "表彰", "アワード", "賞", "栄誉"]）
+    """
+    # 重複を避けるためsetを使用
+    expanded = set(keywords)
+    
+    # 各キーワードについて同義語を探す
+    for keyword in keywords:
+        # 完全一致の同義語を追加
+        for base_word, synonyms in SYNONYM_DICT.items():
+            if keyword == base_word:
+                # base_wordの同義語をすべて追加
+                expanded.update(synonyms)
+            elif keyword in synonyms:
+                # keywordが同義語リストに含まれている場合
+                expanded.add(base_word)
+                expanded.update(synonyms)
+        
+        # 部分マッチの同義語を追加
+        for base_word, synonyms in SYNONYM_DICT.items():
+            if base_word in keyword or keyword in base_word:
+                expanded.add(base_word)
+                expanded.update(synonyms)
+    
+    return list(expanded)
+
+def check_flexible_keyword_match(query_keywords: List[str], doc_keywords: List[str]) -> tuple:
+    """
+    柔軟なキーワードマッチングを実行
+    
+    Args:
+        query_keywords: クエリから抽出されたキーワード
+        doc_keywords: 文書から抽出されたキーワード
+        
+    Returns:
+        (マッチしたかどうか, マッチしたキーワードのリスト, マッチタイプ)
+    """
+    matched_keywords = []  # マッチした組み合わせを記録
+    match_types = []       # マッチの種類を記録
+    
+    # クエリキーワードを同義語で拡張
+    expanded_query_keywords = expand_keywords_with_synonyms(query_keywords)
+    
+    # 拡張されたキーワードと文書キーワードを比較
+    for query_kw in expanded_query_keywords:
+        for doc_kw in doc_keywords:
+            # 1. 完全一致チェック
+            if query_kw == doc_kw:
+                matched_keywords.append(f"{query_kw}={doc_kw}")
+                match_types.append("完全一致")
+                continue
+            
+            # 2. 部分一致チェック（クエリキーワードが文書キーワードに含まれる）
+            if query_kw in doc_kw:
+                matched_keywords.append(f"{query_kw}⊆{doc_kw}")
+                match_types.append("部分一致")
+                continue
+            
+            # 3. 逆部分一致チェック（文書キーワードがクエリキーワードに含まれる）
+            if doc_kw in query_kw:
+                matched_keywords.append(f"{doc_kw}⊆{query_kw}")
+                match_types.append("逆部分一致")
+                continue
+    
+    # マッチしたかどうかを判定
+    is_match = len(matched_keywords) > 0
+    return is_match, matched_keywords, match_types
+
+def filter_chunks_by_flexible_keywords(docs, query):
+    """
+    柔軟なキーワードマッチングを使ってチャンクをフィルタリング
+    
+    Args:
+        docs: 検索で得られたチャンクリスト（Documentオブジェクト）
+        query: ユーザー入力
+        
+    Returns:
+        フィルター後のチャンクリスト
+    """
+    logger = logging.getLogger(ct.LOGGER_NAME)
+    
+    try:
+        # ステップ1: クエリから名詞を抽出
+        tokenizer_obj = dictionary.Dictionary().create()
+        mode = tokenizer.Tokenizer.SplitMode.C
+        tokens = tokenizer_obj.tokenize(query, mode)
+        query_nouns = [
+            t.surface() 
+            for t in tokens
+            if "名詞" in t.part_of_speech() and len(t.surface()) > 1
+        ]
+        
+        logger.info(f"📝 抽出されたクエリ名詞: {query_nouns}")
+        
+        # ステップ2: 各文書とマッチングを実行
+        filtered_docs = []
+        for doc in docs:
+            # 文書のキーワードを取得
+            top_keywords_str = doc.metadata.get("top_keywords", "")
+            if top_keywords_str:
+                top_keywords = [kw.strip() for kw in top_keywords_str.split(" / ") if kw.strip()]
+                
+                # 柔軟なキーワードマッチングを実行
+                is_match, matched_keywords, match_types = check_flexible_keyword_match(
+                    query_nouns, top_keywords
+                )
+                
+                # マッチした場合は結果リストに追加
+                if is_match:
+                    filtered_docs.append(doc)
+                    logger.info(f"✅ マッチ成功:")
+                    logger.info(f"   ファイル: {doc.metadata.get('file_name', '不明')}")
+                    logger.info(f"   マッチしたキーワード: {matched_keywords}")
+                    logger.info(f"   マッチタイプ: {set(match_types)}")
+        
+        logger.info(f"📊 フィルター結果: {len(docs)} → {len(filtered_docs)} 件")
+        
+        # ステップ3: フォールバック処理
+        if not filtered_docs:
+            logger.info("⚠️ フィルター結果が空のため、元のdocsを返します")
+            return docs  # 安全策：フィルター結果が空の場合は元のリストを返す
+        
+        return filtered_docs
+        
+    except Exception as e:
+        logger.error(f"❌ フィルタリング処理でエラーが発生: {e}")
+        return docs  # エラー時も安全策として元のリストを返す
 
 def create_rag_chain(db_name):
     """
@@ -388,6 +538,9 @@ def delete_old_conversation_log(result):
         removed_tokens = len(st.session_state.enc.encode(removed_message.content))
         # 過去の会話履歴の合計トークン数から、最も古い会話履歴のトークン数を引く
         st.session_state.total_tokens -= removed_tokens
+
+
+
 
 def notice_slack(chat_message):
     """
@@ -911,64 +1064,83 @@ def execute_agent_or_chain(chat_message):
     """
     logger = logging.getLogger(ct.LOGGER_NAME)
 
+    # === 追加: 実行モードの明確な記録 ===
+    logger.info(f"🎯 実行モード: {st.session_state.agent_mode}")
+    logger.info(f"📝 入力メッセージ: {chat_message}")
+
     # AIエージェント機能を利用する場合
     if st.session_state.agent_mode == ct.AI_AGENT_MODE_ON:
+        logger.info("🤖 AIエージェントモードで実行")
         st_callback = StreamlitCallbackHandler(st.container())
         result = st.session_state.agent_executor.invoke({"input": chat_message}, {"callbacks": [st_callback]})
         response = result["output"]
     else:
-        # === 修正: top_keywordsフィルターを適用したRAG処理 ===
+        logger.info("🔍 通常RAGモードで実行 - 柔軟キーワードマッチング適用")
         
-        # 1. 通常のRetrieverで関連文書を取得
-        retriever = create_retriever(ct.DB_ALL_PATH)
-        original_docs = retriever.get_relevant_documents(chat_message)
-        
-        # 2. top_keywordsフィルターを適用
-        filtered_docs = filter_chunks_by_top_keywords(original_docs, chat_message)
-        
-        # 3. フィルター後の文書を使って手動でRAG処理を実行
-        if filtered_docs:
-            # フィルター後の文書からcontextを構築
-            context = "\n\n".join([doc.page_content for doc in filtered_docs[:ct.TOP_K]])
-            
-            # プロンプトを手動で構築してLLMに送信
-            question_answer_template = ct.SYSTEM_PROMPT_INQUIRY
-            messages = [
-                {"role": "system", "content": question_answer_template.format(context=context)},
-                {"role": "user", "content": chat_message}
-            ]
-            
-            # 会話履歴を追加（必要に応じて）
-            if st.session_state.chat_history:
-                # 最新の数件の会話履歴のみを追加（トークン制限対策）
-                recent_history = st.session_state.chat_history[-4:]  # 最新4件
-                for msg in recent_history:
-                    if isinstance(msg, HumanMessage):
-                        messages.insert(-1, {"role": "user", "content": msg.content})
-                    elif isinstance(msg, AIMessage):
-                        messages.insert(-1, {"role": "assistant", "content": msg.content})
-            
-            # LLMに送信
-            response_obj = st.session_state.llm.invoke(messages)
-            response = response_obj.content if hasattr(response_obj, 'content') else str(response_obj)
-        else:
-            # フィルター結果が空の場合は通常のRAGを実行
-            logger.info("フィルター結果が空のため、通常のRAGチェーンを実行")
-            result = st.session_state.rag_chain.invoke({
-                "input": chat_message,
-                "chat_history": st.session_state.chat_history
-            })
-            response = result["answer"]
+        try:
+            # 1. 通常のRetrieverで関連文書を取得
+            retriever = create_retriever(ct.DB_ALL_PATH)
+            original_docs = retriever.get_relevant_documents(chat_message)
+            logger.info(f"📚 通常検索結果: {len(original_docs)}件")
 
-        # 会話履歴への追加
-        st.session_state.chat_history.extend([
-            HumanMessage(content=chat_message),
-            AIMessage(content=response)
-        ])
+            # 2. 柔軟なキーワードマッチングを適用
+            logger.info("🧠 柔軟なキーワードマッチングを開始")
+            filtered_docs = filter_chunks_by_flexible_keywords(original_docs, chat_message)
+            logger.info(f"✅ フィルター後: {len(filtered_docs)}件")
+
+            # 3. フィルター後の文書を使って手動でRAG処理を実行
+            if filtered_docs:
+                logger.info("📖 フィルター後文書でRAG実行")
+                # フィルター後の文書からcontextを構築
+                context = "\n\n".join([doc.page_content for doc in filtered_docs[:ct.TOP_K]])
+                
+                # プロンプトを手動で構築してLLMに送信
+                question_answer_template = ct.SYSTEM_PROMPT_INQUIRY
+                messages = [
+                    {"role": "system", "content": question_answer_template.format(context=context)},
+                    {"role": "user", "content": chat_message}
+                ]
+                
+                # LLMに送信
+                response_obj = st.session_state.llm.invoke(messages)
+                response = response_obj.content if hasattr(response_obj, 'content') else str(response_obj)
+                logger.info("✅ カスタムRAG処理完了")
+            else:
+                logger.info("⚠️ フィルター結果が空 - 通常RAGチェーンにフォールバック")
+                # フィルター結果が空の場合は通常のRAGを実行
+                result = st.session_state.rag_chain.invoke({
+                    "input": chat_message,
+                    "chat_history": st.session_state.chat_history
+                })
+                response = result["answer"]
+
+            # 会話履歴への追加
+            st.session_state.chat_history.extend([
+                HumanMessage(content=chat_message),
+                AIMessage(content=response)
+            ])
+            
+        except Exception as e:
+            logger.error(f"❌ RAG処理でエラー発生: {e}")
+            import traceback
+            logger.error(f"詳細エラー: {traceback.format_exc()}")
+            
+            # エラー時のフォールバック
+            try:
+                result = st.session_state.rag_chain.invoke({
+                    "input": chat_message,
+                    "chat_history": st.session_state.chat_history
+                })
+                response = result["answer"]
+                logger.info("🔄 フォールバック処理完了")
+            except Exception as e2:
+                logger.error(f"❌ フォールバック処理もエラー: {e2}")
+                response = "申し訳ございませんが、現在システムに問題が発生しています。"
 
     if response != ct.NO_DOC_MATCH_MESSAGE:
         st.session_state.answer_flg = True
 
+    logger.info(f"📤 最終回答: {response[:100]}...")
     return response
 
 def test_keyword_filter():
@@ -1007,3 +1179,51 @@ def test_keyword_filter():
         
         # 詳細デバッグ
         debug_retriever_with_keywords(query, retriever)
+
+def test_flexible_keyword_filter():
+    """
+    柔軟なキーワードフィルターのテスト関数
+    """
+    logger = logging.getLogger(ct.LOGGER_NAME)
+    
+    # 問題のあったクエリを含むテストケース
+    test_queries = [
+        "受賞歴を教えてください",  # メインの問題クエリ
+        "SNS投稿に関する特典はありますか？",
+        "海外配送は対応していますか？", 
+        "地域貢献活動はありますか？",
+        "株主優待制度について教えて",
+        "環境への取り組みを知りたい",
+        "会社の実績を教えて",
+        "アワードを受賞していますか？"
+    ]
+    
+    retriever = create_retriever(ct.DB_ALL_PATH)
+    
+    for query in test_queries:
+        print(f"\n{'='*100}")
+        print(f"🧪 テストクエリ: {query}")
+        print('='*100)
+        
+        # 通常検索
+        original_docs = retriever.get_relevant_documents(query)
+        
+        # 従来のフィルター
+        old_filtered_docs = filter_chunks_by_top_keywords(original_docs, query)
+        
+        # 新しい柔軟なフィルター
+        new_filtered_docs = filter_chunks_by_flexible_keywords(original_docs, query)
+        
+        print(f"📊 結果比較:")
+        print(f"   - 通常検索: {len(original_docs)}件")
+        print(f"   - 従来フィルター: {len(old_filtered_docs)}件")
+        print(f"   - 柔軟フィルター: {len(new_filtered_docs)}件")
+        print(f"   - 改善効果: {len(new_filtered_docs) - len(old_filtered_docs):+d}件")
+
+def debug_flexible_keyword_matching(query, retriever):
+    """
+    柔軟なキーワードマッチングのデバッグ関数
+    """
+    # 詳細なデバッグ情報を出力
+    # （詳細は省略、実装時に追加）
+    pass
