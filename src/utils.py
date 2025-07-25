@@ -34,6 +34,7 @@ import datetime
 import constants as ct
 from pathlib import Path
 from collections import Counter
+from langchain.schema.document import Document
 # from langchain.text_splitter import RecursiveCharacterTextSplitter as RegexTextSplitter
 
 ############################################################
@@ -388,41 +389,6 @@ def delete_old_conversation_log(result):
         # 過去の会話履歴の合計トークン数から、最も古い会話履歴のトークン数を引く
         st.session_state.total_tokens -= removed_tokens
 
-
-def execute_agent_or_chain(chat_message):
-    """
-    AIエージェントもしくはAIエージェントなしのRAGのChainを実行
-
-    Args:
-        chat_message: ユーザーメッセージ
-    
-    Returns:
-        LLMからの回答
-    """
-    logger = logging.getLogger(ct.LOGGER_NAME)
-
-    # AIエージェント機能を利用する場合
-    if st.session_state.agent_mode == ct.AI_AGENT_MODE_ON:
-        # LLMによる回答をストリーミング出力するためのオブジェクトを用意
-        st_callback = StreamlitCallbackHandler(st.container())
-        # Agent Executorの実行（AIエージェント機能を使う場合は、Toolとして設定した関数内で会話履歴への追加処理を実施）
-        result = st.session_state.agent_executor.invoke({"input": chat_message}, {"callbacks": [st_callback]})
-        response = result["output"]
-    # AIエージェントを利用しない場合
-    else:
-        # RAGのChainを実行
-        result = st.session_state.rag_chain.invoke({"input": chat_message, "chat_history": st.session_state.chat_history})
-        # 会話履歴への追加
-        st.session_state.chat_history.extend([HumanMessage(content=chat_message), AIMessage(content=result["answer"])])
-        response = result["answer"]
-
-    # LLMから参照先のデータを基にした回答が行われた場合のみ、フィードバックボタンを表示
-    if response != ct.NO_DOC_MATCH_MESSAGE:
-        st.session_state.answer_flg = True
-    
-    return response
-
-
 def notice_slack(chat_message):
     """
     問い合わせ内容のSlackへの通知
@@ -725,9 +691,9 @@ def adjust_string(s):
     # OSがWindows以外の場合はそのまま返す
     return s
 
-def debug_retriever_output(query, retriever):
+def debug_retriever_with_keywords(query, retriever):
     """
-    指定されたクエリに対して、retrieverが返すchunkとscoreを表示するデバッグ用関数
+    top_keywordsを含めた詳細なRetrieverデバッグ関数
 
     Args:
         query: ユーザーからの質問
@@ -736,22 +702,82 @@ def debug_retriever_output(query, retriever):
     Returns:
         なし（コンソール出力）
     """
+    logger = logging.getLogger(ct.LOGGER_NAME)
+    
     print("\n" + "=" * 80)
     print(f"🔍 質問: {query}")
     print("=" * 80)
 
+    # クエリから名詞を抽出
     try:
-        results = retriever.vectorstore.similarity_search_with_score(query, k=5)
-        for i, (doc, score) in enumerate(results):
-            print(f"[{i+1}] Score: {score:.4f}")
-            print(f"Chunk Preview: {doc.page_content[:200]}...\n")
+        tokenizer_obj = dictionary.Dictionary().create()
+        mode = tokenizer.Tokenizer.SplitMode.C
+        tokens = tokenizer_obj.tokenize(query, mode)
+        query_nouns = set([
+            t.surface() 
+            for t in tokens
+            if "名詞" in t.part_of_speech() and len(t.surface()) > 1
+        ])
+        print(f"📝 抽出された名詞: {query_nouns}")
     except Exception as e:
-        print("❌ スコア付き取得に失敗しました:", e)
-        print("🔁 fallback: get_relevant_documents() で出力を試みます")
-        docs = retriever.get_relevant_documents(query)
-        for i, doc in enumerate(docs):
-            print(f"[{i+1}] Score: N/A")
-            print(f"Chunk Preview: {doc.page_content[:200]}...\n")
+        print(f"❌ 名詞抽出エラー: {e}")
+        query_nouns = set()
+
+    try:
+        # 通常の検索結果を取得
+        results = retriever.vectorstore.similarity_search_with_score(query, k=20)
+        
+        print(f"\n🔍 検索結果 (上位{len(results)}件):")
+        print("-" * 60)
+        
+        matching_docs = []
+        for i, (doc, score) in enumerate(results):
+            top_keywords_str = doc.metadata.get("top_keywords", "")
+            top_keywords = [kw.strip() for kw in top_keywords_str.split(" / ") if kw.strip()]
+            
+            # キーワードマッチをチェック
+            matched_keywords = [kw for kw in top_keywords if kw in query_nouns]
+            is_match = bool(matched_keywords)
+            
+            if is_match:
+                matching_docs.append((doc, score, matched_keywords))
+            
+            match_status = "✅ MATCH" if is_match else "❌ NO MATCH"
+            
+            print(f"[{i+1}] Score: {score:.4f} {match_status}")
+            print(f"    ファイル: {doc.metadata.get('file_name', '不明')}")
+            print(f"    カテゴリ: {doc.metadata.get('category', '不明')}")
+            print(f"    キーワード: {top_keywords}")
+            if matched_keywords:
+                print(f"    🎯 マッチしたキーワード: {matched_keywords}")
+            print(f"    内容: {doc.page_content[:150]}...")
+            print()
+        
+        print(f"\n📊 フィルター結果統計:")
+        print(f"   - 全体: {len(results)}件")
+        print(f"   - マッチ: {len(matching_docs)}件")
+        print(f"   - フィルター率: {len(matching_docs)/len(results)*100:.1f}%")
+        
+        # マッチした文書の詳細表示
+        if matching_docs:
+            print(f"\n🎯 top_keywordsでマッチした文書:")
+            print("-" * 60)
+            for i, (doc, score, matched_kw) in enumerate(matching_docs[:5]):
+                print(f"[マッチ{i+1}] Score: {score:.4f}")
+                print(f"    マッチキーワード: {matched_kw}")
+                print(f"    内容: {doc.page_content[:200]}...")
+                print()
+        
+    except Exception as e:
+        print(f"❌ 検索処理エラー: {e}")
+        # fallback処理
+        try:
+            docs = retriever.get_relevant_documents(query)
+            print(f"🔄 fallback検索結果: {len(docs)}件")
+            for i, doc in enumerate(docs[:3]):
+                print(f"[{i+1}] {doc.page_content[:100]}...")
+        except Exception as e2:
+            print(f"❌ fallback検索もエラー: {e2}")
 
 def create_retriever(db_name):
     """
@@ -818,3 +844,166 @@ def create_retriever(db_name):
 
     retriever = db.as_retriever(search_kwargs={"k": ct.TOP_K})
     return retriever
+
+def filter_chunks_by_top_keywords(docs, query):
+    """
+    top_keywords を使ってチャンクをフィルタリング
+
+    Args:
+        docs: 検索で得られたチャンクリスト（Documentオブジェクト）
+        query: ユーザー入力
+
+    Returns:
+        フィルター後のチャンクリスト（条件に一致しない場合は元のdocsを返す）
+    """
+    logger = logging.getLogger(ct.LOGGER_NAME)
+    
+    try:
+        # クエリから名詞を抽出
+        tokenizer_obj = dictionary.Dictionary().create()
+        mode = tokenizer.Tokenizer.SplitMode.C
+        tokens = tokenizer_obj.tokenize(query, mode)
+        query_nouns = set([
+            t.surface() 
+            for t in tokens
+            if "名詞" in t.part_of_speech() and len(t.surface()) > 1
+        ])
+        
+        # デバッグログ出力
+        logger.info(f"フィルター対象クエリ名詞: {query_nouns}")
+        logger.info(f"フィルター前チャンク件数: {len(docs)}")
+        
+        # フィルタリング実行
+        filtered_docs = []
+        for doc in docs:
+            top_keywords_str = doc.metadata.get("top_keywords", "")
+            if top_keywords_str:
+                # top_keywordsが " / " で区切られている場合の処理
+                top_keywords = [kw.strip() for kw in top_keywords_str.split(" / ") if kw.strip()]
+                
+                # クエリの名詞とキーワードの一致チェック
+                if any(kw in query_nouns for kw in top_keywords if kw):
+                    filtered_docs.append(doc)
+                    logger.info(f"マッチしたキーワード: {[kw for kw in top_keywords if kw in query_nouns]}")
+        
+        logger.info(f"フィルター後チャンク件数: {len(filtered_docs)}")
+        
+        # フィルター結果が空の場合は元のdocsを返す（fallback）
+        if not filtered_docs:
+            logger.info("フィルター結果が空のため、元のdocsを返します")
+            return docs
+        
+        return filtered_docs
+        
+    except Exception as e:
+        logger.error(f"フィルタリング処理でエラーが発生: {e}")
+        return docs  # エラー時は元のdocsを返す
+
+def execute_agent_or_chain(chat_message):
+    """
+    AIエージェントもしくはAIエージェントなしのRAGのChainを実行
+
+    Args:
+        chat_message: ユーザーメッセージ
+
+    Returns:
+        LLMからの回答
+    """
+    logger = logging.getLogger(ct.LOGGER_NAME)
+
+    # AIエージェント機能を利用する場合
+    if st.session_state.agent_mode == ct.AI_AGENT_MODE_ON:
+        st_callback = StreamlitCallbackHandler(st.container())
+        result = st.session_state.agent_executor.invoke({"input": chat_message}, {"callbacks": [st_callback]})
+        response = result["output"]
+    else:
+        # === 修正: top_keywordsフィルターを適用したRAG処理 ===
+        
+        # 1. 通常のRetrieverで関連文書を取得
+        retriever = create_retriever(ct.DB_ALL_PATH)
+        original_docs = retriever.get_relevant_documents(chat_message)
+        
+        # 2. top_keywordsフィルターを適用
+        filtered_docs = filter_chunks_by_top_keywords(original_docs, chat_message)
+        
+        # 3. フィルター後の文書を使って手動でRAG処理を実行
+        if filtered_docs:
+            # フィルター後の文書からcontextを構築
+            context = "\n\n".join([doc.page_content for doc in filtered_docs[:ct.TOP_K]])
+            
+            # プロンプトを手動で構築してLLMに送信
+            question_answer_template = ct.SYSTEM_PROMPT_INQUIRY
+            messages = [
+                {"role": "system", "content": question_answer_template.format(context=context)},
+                {"role": "user", "content": chat_message}
+            ]
+            
+            # 会話履歴を追加（必要に応じて）
+            if st.session_state.chat_history:
+                # 最新の数件の会話履歴のみを追加（トークン制限対策）
+                recent_history = st.session_state.chat_history[-4:]  # 最新4件
+                for msg in recent_history:
+                    if isinstance(msg, HumanMessage):
+                        messages.insert(-1, {"role": "user", "content": msg.content})
+                    elif isinstance(msg, AIMessage):
+                        messages.insert(-1, {"role": "assistant", "content": msg.content})
+            
+            # LLMに送信
+            response_obj = st.session_state.llm.invoke(messages)
+            response = response_obj.content if hasattr(response_obj, 'content') else str(response_obj)
+        else:
+            # フィルター結果が空の場合は通常のRAGを実行
+            logger.info("フィルター結果が空のため、通常のRAGチェーンを実行")
+            result = st.session_state.rag_chain.invoke({
+                "input": chat_message,
+                "chat_history": st.session_state.chat_history
+            })
+            response = result["answer"]
+
+        # 会話履歴への追加
+        st.session_state.chat_history.extend([
+            HumanMessage(content=chat_message),
+            AIMessage(content=response)
+        ])
+
+    if response != ct.NO_DOC_MATCH_MESSAGE:
+        st.session_state.answer_flg = True
+
+    return response
+
+def test_keyword_filter():
+    """
+    キーワードフィルターのテスト関数
+    """
+    logger = logging.getLogger(ct.LOGGER_NAME)
+    
+    test_queries = [
+        "SNS投稿に関する特典はありますか？",
+        "海外配送は対応していますか？", 
+        "地域貢献活動はありますか？",
+        "受賞歴を教えてください",
+        "株主優待制度について教えて",
+        "環境への取り組みを知りたい",
+        "サブスクリプションプランの料金は？"
+    ]
+    
+    retriever = create_retriever(ct.DB_ALL_PATH)
+    
+    for query in test_queries:
+        print(f"\n{'='*100}")
+        print(f"🧪 テストクエリ: {query}")
+        print('='*100)
+        
+        # 通常検索
+        original_docs = retriever.get_relevant_documents(query)
+        
+        # フィルター適用
+        filtered_docs = filter_chunks_by_top_keywords(original_docs, query)
+        
+        print(f"📊 結果:")
+        print(f"   - 通常検索: {len(original_docs)}件")
+        print(f"   - フィルター後: {len(filtered_docs)}件")
+        print(f"   - フィルター効果: {(1-len(filtered_docs)/len(original_docs))*100:.1f}%削減")
+        
+        # 詳細デバッグ
+        debug_retriever_with_keywords(query, retriever)

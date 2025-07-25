@@ -129,16 +129,29 @@ def initialize_agent_executor():
 
     # ✅ RetrieverデバッグモードがONかつ未実行の場合、一度だけ実行
     if st.session_state.get("retriever_debug_mode") and not st.session_state.get("retriever_debug_done"):
-        test_queries = [
-            "SNS投稿に関する特典はありますか？",
-            "海外配送は対応していますか？",
-            "地域貢献活動はありますか？",
-            "受賞歴を教えてください",
-            "EcoTeeは地域社会への貢献活動をしていますか？"
-        ]
-        for query in test_queries:
-            utils.debug_retriever_output(query, retriever)
+        logger.info("🔧 Retrieverデバッグモードを開始します")
+        
+        # 修正: 新しいテスト関数を使用
+        try:
+            utils.test_keyword_filter()
+        except Exception as e:
+            logger.error(f"デバッグテスト中にエラー: {e}")
+            # fallback: 元のテスト関数を使用
+            test_queries = [
+                "SNS投稿に関する特典はありますか？",
+                "海外配送は対応していますか？",
+                "地域貢献活動はありますか？",
+                "受賞歴を教えてください",
+                "EcoTeeは地域社会への貢献活動をしていますか？"
+            ]
+            for query in test_queries:
+                try:
+                    utils.debug_retriever_with_keywords(query, retriever)
+                except Exception as e2:
+                    logger.error(f"個別クエリテストでエラー ({query}): {e2}")
+        
         st.session_state.retriever_debug_done = True
+        logger.info("🔧 Retrieverデバッグモード完了")
 
     # Web検索用のToolを設定するためのオブジェクトを用意
     search = SerpAPIWrapper()
