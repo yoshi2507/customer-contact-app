@@ -35,7 +35,7 @@ import constants as ct
 from pathlib import Path
 from collections import Counter
 from langchain.schema.document import Document
-# from langchain.text_splitter import RecursiveCharacterTextSplitter as RegexTextSplitter
+from langchain.text_splitter import RecursiveCharacterTextSplitter as RegexTextSplitter
 
 # ============================================================================
 # 同義語辞書（必要に応じて拡張可能）
@@ -62,7 +62,160 @@ load_dotenv()
 ############################################################
 # 関数定義
 ############################################################
+def create_smart_text_splitter():
+    """
+    構造化されたテキスト分割を行うスプリッターを作成
+    """
+    # 構造化テキスト用の区切り文字を優先順位順に定義
+    separators = [
+        "\n\n",          # 段落間
+        "\n● ",          # 主要な箇条書き
+        "\n○ ",          # 副次的な箇条書き
+        "\n■ ",          # その他のマーク
+        "\n【",          # セクション見出し
+        "\n",            # 一般的な改行
+        "。",            # 句点
+        ".",             # ピリオド
+        " ",             # スペース
+        ""               # 文字単位（最終手段）
+    ]
+    
+    return RecursiveCharacterTextSplitter(
+        separators=separators,
+        chunk_size=ct.CHUNK_SIZE,
+        chunk_overlap=ct.CHUNK_OVERLAP,
+        length_function=len,
+        is_separator_regex=False,
+    )
 
+def create_award_aware_chunks(content):
+    """
+    受賞情報を意識したチャンク作成
+    """
+    lines = content.split('\n')
+    chunks = []
+    current_chunk = ""
+    current_section = ""
+    
+    for line in lines:
+        stripped_line = line.strip()
+        
+        # 受賞関連のセクションを検出
+        if any(keyword in stripped_line for keyword in ['受賞', 'アワード', '表彰', '栄誉', '実績と評価']):
+            # 受賞セクションの開始
+            if current_chunk and len(current_chunk) > 100:
+                chunks.append(current_chunk.strip())
+                current_chunk = ""
+            current_section = "受賞関連"
+        
+        # セクション見出しを検出
+        elif stripped_line.startswith(('●', '○', '■', '【', '▶')):
+            # 新しいセクションの開始
+            if current_chunk and len(current_chunk) > ct.CHUNK_SIZE:
+                chunks.append(current_chunk.strip())
+                current_chunk = ""
+        
+        # 現在の行を追加
+        if current_chunk:
+            current_chunk += "\n" + line
+        else:
+            current_chunk = line
+        
+        # 受賞関連情報は少し長めのチャンクを許可
+        max_chunk_size = ct.CHUNK_SIZE * 1.5 if current_section == "受賞関連" else ct.CHUNK_SIZE
+        
+        # チャンクサイズ上限チェック
+        if len(current_chunk) > max_chunk_size:
+            chunks.append(current_chunk.strip())
+            current_chunk = ""
+            current_section = ""
+    
+    # 最後のチャンクを追加
+    if current_chunk.strip():
+        chunks.append(current_chunk.strip())
+    
+    return chunks
+
+def improved_create_rag_chain(db_name):
+    """
+    改良版RAGチェーン作成（チャンク分割を改善）
+    """
+    logger = logging.getLogger(ct.LOGGER_NAME)
+
+    docs_all = []
+    # 既存のファイル読み込み処理...
+    if db_name == ct.DB_ALL_PATH:
+        folders = os.listdir(ct.RAG_TOP_FOLDER_PATH)
+        for folder_path in folders:
+            if folder_path.startswith("."):
+                continue
+            add_docs(f"{ct.RAG_TOP_FOLDER_PATH}/{folder_path}", docs_all)
+    else:
+        folder_path = ct.DB_NAMES[db_name]
+        add_docs(folder_path, docs_all)
+
+    # 文字調整
+    for doc in docs_all:
+        doc.page_content = adjust_string(doc.page_content)
+        for key in doc.metadata:
+            doc.metadata[key] = adjust_string(doc.metadata[key])
+    
+    # 🔧 改良版テキスト分割
+    splitted_docs = []
+    
+    for doc in docs_all:
+        content = doc.page_content
+        file_name = doc.metadata.get('file_name', '不明')
+        
+        # 受賞情報を含む文書かチェック
+        has_award_info = any(keyword in content for keyword in ['受賞', 'アワード', '表彰', '栄誉'])
+        
+        if has_award_info:
+            logger.info(f"🏆 受賞情報検出: {file_name} - 特別なチャンク分割を適用")
+            # 受賞情報を意識した分割
+            chunk_texts = create_award_aware_chunks(content)
+        else:
+            # 通常の構造化分割
+            text_splitter = create_smart_text_splitter()
+            chunk_texts = text_splitter.split_text(content)
+        
+        # Document オブジェクトを作成
+        for i, chunk_text in enumerate(chunk_texts):
+            new_doc = Document(
+                page_content=chunk_text,
+                metadata={**doc.metadata, "chunk_id": i}
+            )
+            splitted_docs.append(new_doc)
+            
+            # 受賞関連チャンクのログ出力
+            if has_award_info and any(keyword in chunk_text for keyword in ['受賞', 'アワード']):
+                logger.info(f"✅ 受賞チャンク作成: {file_name}[{i}] - {len(chunk_text)}文字")
+                logger.info(f"   内容プレビュー: {chunk_text[:100]}...")
+    
+    # 残りの処理は既存と同じ...
+    for doc in splitted_docs:
+        file_name = doc.metadata.get("file_name", "不明")
+        category = doc.metadata.get("category", "不明")
+        heading = doc.metadata.get("first_heading", "")
+        keywords_str = doc.metadata.get("top_keywords", "")
+
+        prefix = f"【カテゴリ: {category}】【ファイル名: {file_name}】"
+        if heading:
+            prefix += f"【見出し: {heading}】"
+        if keywords_str:
+            prefix += f"【キーワード: {keywords_str}】"
+
+        doc.page_content = prefix + "\n" + doc.page_content
+
+    # ベクトルDB作成
+    embeddings = OpenAIEmbeddings()
+    
+    if os.path.isdir(db_name):
+        db = Chroma(persist_directory=".db", embedding_function=embeddings)
+    else:
+        db = Chroma.from_documents(splitted_docs, embedding=embeddings, persist_directory=".db")
+    
+    retriever = db.as_retriever(search_kwargs={"k": ct.TOP_K})
 def build_error_message(message):
     """
     エラーメッセージと管理者問い合わせテンプレートの連結
@@ -74,6 +227,17 @@ def build_error_message(message):
         エラーメッセージと管理者問い合わせテンプレートの連結テキスト
     """
     return "\n".join([message, ct.COMMON_ERROR_MESSAGE])
+
+def clean_keyword(keyword): 
+    """
+    キーワードから不正な文字を除去
+    """
+    import re
+    # ゼロ幅文字やMarkdown記号を除去
+    cleaned = re.sub(r'[\u200b\u200c\u200d\ufeff●○■□▶◇◆\.]', '', keyword)
+    # 前後の空白を除去
+    cleaned = cleaned.strip()
+    return cleaned
 
 def expand_keywords_with_synonyms(keywords: List[str]) -> List[str]:
     """
@@ -258,14 +422,13 @@ def create_rag_chain(db_name):
         file_name = doc.metadata.get("file_name", "不明")
         category = doc.metadata.get("category", "不明")
         heading = doc.metadata.get("first_heading", "")
-        keywords = doc.metadata.get("top_keywords", [])
-        keyword_str = "/".join(keywords) if keywords else ""
+        keywords_str = doc.metadata.get("top_keywords", "") 
 
         prefix = f"【カテゴリ: {category}】【ファイル名: {file_name}】"
         if heading:
             prefix += f"【見出し: {heading}】"
-        if keyword_str:
-            prefix += f"【キーワード: {keyword_str}】"
+        if keywords_str:  # ← 修正：文字列をそのまま使用
+            prefix += f"【キーワード: {keywords_str}】"
 
         doc.page_content = prefix + "\n" + doc.page_content
 
@@ -364,26 +527,51 @@ def add_docs(folder_path, docs_all):
             doc.metadata["first_heading"] = section_titles[0] if section_titles else ""
             doc.metadata["section_count"] = len(section_titles)
 
-            # 🧠 頻出キーワード（名詞のみ）
-            tokenizer_obj = dictionary.Dictionary().create()
-            mode = tokenizer.Tokenizer.SplitMode.C
-            tokens = tokenizer_obj.tokenize(content, mode)
-            nouns = [
-                t.surface() 
-                for t in tokens
-                if "名詞" in t.part_of_speech() and len(t.surface()) > 1
-            ]
-            top_keywords = [
-                word 
-                for word, _ in Counter(
-                    t.surface()
-                    for t in tokenizer_obj.tokenize(content, tokenizer.Tokenizer.SplitMode.C)
-                    if "名詞" in t.part_of_speech() and len(t.surface()) > 1
-                ).most_common(5)
-        ]
-            doc.metadata["top_keywords"] = " / ".join(top_keywords)
-            # デバッグ用に出力
-            print(f"🔑 抽出キーワード: {top_keywords}")
+            # 🧠 頻出キーワード（名詞のみ）- 修正版
+            try:
+                # 形態素解析の実行
+                tokenizer_obj = dictionary.Dictionary().create()
+                mode = tokenizer.Tokenizer.SplitMode.C
+                tokens = tokenizer_obj.tokenize(content, mode)
+                
+                # 名詞のみを抽出（クリーニング付き）
+                nouns = []
+                raw_nouns_sample = []  # デバッグ用サンプル
+                
+                for i, t in enumerate(tokens):
+                    surface = t.surface()
+                    if "名詞" in t.part_of_speech() and len(surface) > 1:
+                        # デバッグ用サンプル収集（最初の10個まで）
+                        if len(raw_nouns_sample) < 10:
+                            raw_nouns_sample.append(surface)
+                        
+                        # キーワードをクリーニング
+                        cleaned_surface = clean_keyword(surface)
+                        if cleaned_surface and len(cleaned_surface) > 1:  # 空文字や1文字を除外
+                            nouns.append(cleaned_surface)
+                
+                # デバッグ用出力
+                if raw_nouns_sample:
+                    print(f"📝 クリーニング前サンプル ({p.name}): {raw_nouns_sample}")
+                    print(f"📝 クリーニング後サンプル ({p.name}): {nouns[:10]}")
+                
+                # 頻出キーワードを取得
+                if nouns:
+                    word_counts = Counter(nouns)
+                    top_keywords = [word for word, count in word_counts.most_common(5)]
+                    print(f"🔑 抽出キーワード ({p.name}): {top_keywords}")
+                else:
+                    top_keywords = []
+                    print(f"⚠️ 名詞が抽出されませんでした: {p.name}")
+                
+                # メタデータに設定
+                doc.metadata["top_keywords"] = " / ".join(top_keywords)
+                
+            except Exception as e:
+                print(f"❌ キーワード抽出エラー ({p.name}): {e}")
+                import traceback
+                print(f"詳細エラー: {traceback.format_exc()}")
+                doc.metadata["top_keywords"] = ""
 
             # ✏️ 文字数・行数など（追加で役立つ）
             doc.metadata["num_chars"] = len(content)
@@ -978,15 +1166,14 @@ def create_retriever(db_name):
         file_name = doc.metadata.get("file_name", "不明")
         category = doc.metadata.get("category", "不明")
         heading = doc.metadata.get("first_heading", "")
-        keywords = doc.metadata.get("top_keywords", [])
-        keyword_str = "/".join(keywords) if keywords else ""
+        keywords_str = doc.metadata.get("top_keywords", "")
 
         # メタ情報を1行目に構造化（お好みで調整可能）
         prefix = f"【カテゴリ: {category}】【ファイル名: {file_name}】"
-        if heading:
-            prefix += f"【見出し: {heading}】"
-        if keyword_str:
-            prefix += f"【キーワード: {keyword_str}】"
+    if heading:
+        prefix += f"【見出し: {heading}】"
+    if keywords_str:  # ← 修正：文字列をそのまま使用
+        prefix += f"【キーワード: {keywords_str}】"
 
         doc.page_content = prefix + "\n" + doc.page_content
 
