@@ -148,4 +148,4 @@ zipp==3.21.0
 zstandard==0.23.0
 sudachipy
 sudachidict_core
-faiss-cpu==1.8.0
+faiss-cpu
