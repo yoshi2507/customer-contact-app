@@ -116,9 +116,38 @@ if chat_message:
                 result = utils.execute_agent_or_chain(chat_message)
         else:
             with st.spinner(ct.SPINNER_CONTACT_TEXT):
+                # === 追加: デバッグ情報を標準出力に直接表示 ===
+                print(f"🔍 Slack通知モード開始: {chat_message}")
+                print(f"🔍 環境変数確認:")
+                print(f"  - SLACK_BOT_TOKEN: {'設定済み' if os.getenv('SLACK_BOT_TOKEN') or st.secrets.get('SLACK_BOT_TOKEN') else '未設定'}")
+                print(f"  - SLACK_USER_TOKEN: {'設定済み' if os.getenv('SLACK_USER_TOKEN') or st.secrets.get('SLACK_USER_TOKEN') else '未設定'}")
+                print(f"  - SERP_API_KEY: {'設定済み' if os.getenv('SERP_API_KEY') or st.secrets.get('SERP_API_KEY') else '未設定'}")
+                
                 result = utils.notice_slack(chat_message)
+                print(f"🔍 Slack通知完了: {result}")
+                
     except Exception as e:
+        # === 修正: より詳細なエラー情報を出力 ===
+        import traceback
+        
+        error_details = {
+            "error_type": type(e).__name__,
+            "error_message": str(e),
+            "contact_mode": st.session_state.contact_mode,
+            "traceback": traceback.format_exc()
+        }
+        
+        # 標準出力に直接出力（Streamlit Cloudのログに確実に表示）
+        print(f"❌ エラー発生!")
+        print(f"❌ エラータイプ: {error_details['error_type']}")
+        print(f"❌ エラーメッセージ: {error_details['error_message']}")
+        print(f"❌ コンタクトモード: {error_details['contact_mode']}")
+        print(f"❌ スタックトレース:\n{error_details['traceback']}")
+        
+        # 既存のログ出力も維持
         logger.error(f"{ct.MAIN_PROCESS_ERROR_MESSAGE}\n{e}")
+        logger.error(f"詳細エラー情報: {error_details}")
+        
         st.error(utils.build_error_message(ct.MAIN_PROCESS_ERROR_MESSAGE), icon=ct.ERROR_ICON)
         st.stop()
     
