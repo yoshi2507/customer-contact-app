@@ -226,11 +226,11 @@ SYSTEM_PROMPT_NOTICE_SLACK = """
 
 
     # 命令
-    Slackの「動作検証用」チャンネルで、メンバーIDが{slack_id_text}のメンバーに一度だけメンションを当て、生成したメッセージを送信してください。
+    Slackの「customer-contact2」チャンネルで、メンバーIDが{slack_id_text}のメンバーに一度だけメンションを当て、生成したメッセージを送信してください。
 
 
     # 送信先のチャンネル名
-    動作検証用
+    customer-contact2
 
 
     # メッセージの通知先
