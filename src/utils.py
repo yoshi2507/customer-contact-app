@@ -1,5 +1,6 @@
 """
 このファイルは、画面表示以外の様々な関数定義のファイルです。
+（Faiss保存方法修正版）
 """
 
 ############################################################
@@ -16,7 +17,8 @@ from langchain.text_splitter import CharacterTextSplitter
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder, PromptTemplate
 from langchain.schema import HumanMessage, AIMessage
 from langchain_openai import OpenAIEmbeddings
-from langchain_community.vectorstores import Chroma
+# ChromaDBの代わりにFaissを使用
+from langchain_community.vectorstores import FAISS
 from langchain.chains import create_history_aware_retriever, create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_community.callbacks.streamlit import StreamlitCallbackHandler
@@ -36,6 +38,9 @@ from pathlib import Path
 from collections import Counter
 from langchain.schema.document import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter as RegexTextSplitter
+import pickle
+import hashlib
+import json
 
 # ============================================================================
 # 同義語辞書（必要に応じて拡張可能）
@@ -60,162 +65,140 @@ load_dotenv()
 
 
 ############################################################
+# Faiss専用の保存・読み込み関数
+############################################################
+
+def save_faiss_index(db, base_path):
+    """
+    Faissインデックスを適切な方法で保存
+    
+    Args:
+        db: FAISSベクトルストアオブジェクト
+        base_path: 保存先のベースパス（拡張子なし）
+    """
+    try:
+        # Faiss専用の保存方法を使用
+        db.save_local(base_path)
+        logger = logging.getLogger(ct.LOGGER_NAME)
+        logger.info(f"✅ Faissインデックス保存完了: {base_path}")
+        return True
+    except Exception as e:
+        logger = logging.getLogger(ct.LOGGER_NAME)
+        logger.error(f"❌ Faissインデックス保存エラー: {e}")
+        return False
+
+def load_faiss_index(base_path, embeddings):
+    """
+    Faissインデックスを適切な方法で読み込み
+    
+    Args:
+        base_path: 読み込み元のベースパス（拡張子なし）
+        embeddings: 埋め込みオブジェクト
+        
+    Returns:
+        FAISSベクトルストアオブジェクト または None
+    """
+    try:
+        # Faiss専用の読み込み方法を使用
+        db = FAISS.load_local(base_path, embeddings, allow_dangerous_deserialization=True)
+        logger = logging.getLogger(ct.LOGGER_NAME)
+        logger.info(f"✅ Faissインデックス読み込み完了: {base_path}")
+        return db
+    except Exception as e:
+        logger = logging.getLogger(ct.LOGGER_NAME)
+        logger.warning(f"⚠️ Faissインデックス読み込み失敗: {e}")
+        return None
+
+def calculate_docs_hash(docs):
+    """
+    ドキュメントリストのハッシュ値を計算（変更検知用）
+    
+    Args:
+        docs: ドキュメントリスト
+        
+    Returns:
+        ハッシュ値文字列
+    """
+    # ドキュメントの内容からハッシュを生成
+    content_str = ""
+    for doc in docs:
+        content_str += doc.page_content + str(doc.metadata)
+    
+    return hashlib.md5(content_str.encode('utf-8')).hexdigest()
+
+def should_rebuild_index(base_path, docs):
+    """
+    インデックスの再構築が必要かチェック
+    
+    Args:
+        base_path: インデックスのベースパス
+        docs: 現在のドキュメントリスト
+        
+    Returns:
+        bool: 再構築が必要な場合True
+    """
+    metadata_file = f"{base_path}_metadata.json"
+    
+    # メタデータファイルが存在しない場合は再構築
+    if not os.path.exists(metadata_file):
+        return True
+    
+    # Faissインデックスファイルが存在しない場合は再構築
+    if not os.path.exists(f"{base_path}.faiss"):
+        return True
+    
+    try:
+        # メタデータを読み込み
+        with open(metadata_file, 'r', encoding='utf-8') as f:
+            metadata = json.load(f)
+        
+        # ドキュメントのハッシュを比較
+        current_hash = calculate_docs_hash(docs)
+        stored_hash = metadata.get('docs_hash', '')
+        
+        if current_hash != stored_hash:
+            logger = logging.getLogger(ct.LOGGER_NAME)
+            logger.info("📝 ドキュメントが変更されたため、インデックスを再構築します")
+            return True
+        
+        return False
+        
+    except Exception as e:
+        logger = logging.getLogger(ct.LOGGER_NAME)
+        logger.warning(f"⚠️ メタデータ読み込みエラー、再構築します: {e}")
+        return True
+
+def save_index_metadata(base_path, docs):
+    """
+    インデックスのメタデータを保存
+    
+    Args:
+        base_path: インデックスのベースパス
+        docs: ドキュメントリスト
+    """
+    try:
+        metadata_file = f"{base_path}_metadata.json"
+        metadata = {
+            'docs_hash': calculate_docs_hash(docs),
+            'doc_count': len(docs),
+            'created_at': datetime.datetime.now().isoformat(),
+            'version': '1.0'
+        }
+        
+        with open(metadata_file, 'w', encoding='utf-8') as f:
+            json.dump(metadata, f, ensure_ascii=False, indent=2)
+            
+        logger = logging.getLogger(ct.LOGGER_NAME)
+        logger.info(f"✅ メタデータ保存完了: {metadata_file}")
+        
+    except Exception as e:
+        logger = logging.getLogger(ct.LOGGER_NAME)
+        logger.error(f"❌ メタデータ保存エラー: {e}")
+
+############################################################
 # 関数定義
 ############################################################
-def create_smart_text_splitter():
-    """
-    構造化されたテキスト分割を行うスプリッターを作成
-    """
-    # 構造化テキスト用の区切り文字を優先順位順に定義
-    separators = [
-        "\n\n",          # 段落間
-        "\n● ",          # 主要な箇条書き
-        "\n○ ",          # 副次的な箇条書き
-        "\n■ ",          # その他のマーク
-        "\n【",          # セクション見出し
-        "\n",            # 一般的な改行
-        "。",            # 句点
-        ".",             # ピリオド
-        " ",             # スペース
-        ""               # 文字単位（最終手段）
-    ]
-    
-    return RecursiveCharacterTextSplitter(
-        separators=separators,
-        chunk_size=ct.CHUNK_SIZE,
-        chunk_overlap=ct.CHUNK_OVERLAP,
-        length_function=len,
-        is_separator_regex=False,
-    )
 
-def create_award_aware_chunks(content):
-    """
-    受賞情報を意識したチャンク作成
-    """
-    lines = content.split('\n')
-    chunks = []
-    current_chunk = ""
-    current_section = ""
-    
-    for line in lines:
-        stripped_line = line.strip()
-        
-        # 受賞関連のセクションを検出
-        if any(keyword in stripped_line for keyword in ['受賞', 'アワード', '表彰', '栄誉', '実績と評価']):
-            # 受賞セクションの開始
-            if current_chunk and len(current_chunk) > 100:
-                chunks.append(current_chunk.strip())
-                current_chunk = ""
-            current_section = "受賞関連"
-        
-        # セクション見出しを検出
-        elif stripped_line.startswith(('●', '○', '■', '【', '▶')):
-            # 新しいセクションの開始
-            if current_chunk and len(current_chunk) > ct.CHUNK_SIZE:
-                chunks.append(current_chunk.strip())
-                current_chunk = ""
-        
-        # 現在の行を追加
-        if current_chunk:
-            current_chunk += "\n" + line
-        else:
-            current_chunk = line
-        
-        # 受賞関連情報は少し長めのチャンクを許可
-        max_chunk_size = ct.CHUNK_SIZE * 1.5 if current_section == "受賞関連" else ct.CHUNK_SIZE
-        
-        # チャンクサイズ上限チェック
-        if len(current_chunk) > max_chunk_size:
-            chunks.append(current_chunk.strip())
-            current_chunk = ""
-            current_section = ""
-    
-    # 最後のチャンクを追加
-    if current_chunk.strip():
-        chunks.append(current_chunk.strip())
-    
-    return chunks
-
-def improved_create_rag_chain(db_name):
-    """
-    改良版RAGチェーン作成（チャンク分割を改善）
-    """
-    logger = logging.getLogger(ct.LOGGER_NAME)
-
-    docs_all = []
-    # 既存のファイル読み込み処理...
-    if db_name == ct.DB_ALL_PATH:
-        folders = os.listdir(ct.RAG_TOP_FOLDER_PATH)
-        for folder_path in folders:
-            if folder_path.startswith("."):
-                continue
-            add_docs(f"{ct.RAG_TOP_FOLDER_PATH}/{folder_path}", docs_all)
-    else:
-        folder_path = ct.DB_NAMES[db_name]
-        add_docs(folder_path, docs_all)
-
-    # 文字調整
-    for doc in docs_all:
-        doc.page_content = adjust_string(doc.page_content)
-        for key in doc.metadata:
-            doc.metadata[key] = adjust_string(doc.metadata[key])
-    
-    # 🔧 改良版テキスト分割
-    splitted_docs = []
-    
-    for doc in docs_all:
-        content = doc.page_content
-        file_name = doc.metadata.get('file_name', '不明')
-        
-        # 受賞情報を含む文書かチェック
-        has_award_info = any(keyword in content for keyword in ['受賞', 'アワード', '表彰', '栄誉'])
-        
-        if has_award_info:
-            logger.info(f"🏆 受賞情報検出: {file_name} - 特別なチャンク分割を適用")
-            # 受賞情報を意識した分割
-            chunk_texts = create_award_aware_chunks(content)
-        else:
-            # 通常の構造化分割
-            text_splitter = create_smart_text_splitter()
-            chunk_texts = text_splitter.split_text(content)
-        
-        # Document オブジェクトを作成
-        for i, chunk_text in enumerate(chunk_texts):
-            new_doc = Document(
-                page_content=chunk_text,
-                metadata={**doc.metadata, "chunk_id": i}
-            )
-            splitted_docs.append(new_doc)
-            
-            # 受賞関連チャンクのログ出力
-            if has_award_info and any(keyword in chunk_text for keyword in ['受賞', 'アワード']):
-                logger.info(f"✅ 受賞チャンク作成: {file_name}[{i}] - {len(chunk_text)}文字")
-                logger.info(f"   内容プレビュー: {chunk_text[:100]}...")
-    
-    # 残りの処理は既存と同じ...
-    for doc in splitted_docs:
-        file_name = doc.metadata.get("file_name", "不明")
-        category = doc.metadata.get("category", "不明")
-        heading = doc.metadata.get("first_heading", "")
-        keywords_str = doc.metadata.get("top_keywords", "")
-
-        prefix = f"【カテゴリ: {category}】【ファイル名: {file_name}】"
-        if heading:
-            prefix += f"【見出し: {heading}】"
-        if keywords_str:
-            prefix += f"【キーワード: {keywords_str}】"
-
-        doc.page_content = prefix + "\n" + doc.page_content
-
-    # ベクトルDB作成
-    embeddings = OpenAIEmbeddings()
-    
-    if os.path.isdir(db_name):
-        db = Chroma(persist_directory=".db", embedding_function=embeddings)
-    else:
-        db = Chroma.from_documents(splitted_docs, embedding=embeddings, persist_directory=".db")
-    
-    retriever = db.as_retriever(search_kwargs={"k": ct.TOP_K})
 def build_error_message(message):
     """
     エラーメッセージと管理者問い合わせテンプレートの連結
@@ -376,7 +359,7 @@ def filter_chunks_by_flexible_keywords(docs, query):
 
 def create_rag_chain(db_name):
     """
-    引数として渡されたDB内を参照するRAGのChainを作成
+    引数として渡されたDB内を参照するRAGのChainを作成（Faiss修正版）
 
     Args:
         db_name: RAG化対象のデータを格納するデータベース名
@@ -406,17 +389,13 @@ def create_rag_chain(db_name):
         for key in doc.metadata:
             doc.metadata[key] = adjust_string(doc.metadata[key])
     
-    #text_splitter = RegexTextSplitter(
-    #separators=["\n\n", "\n", "● ", "○ ", "■ ", "【", "】", ".", "。", " "],
-    #chunk_size=ct.CHUNK_SIZE,
-    #chunk_overlap=ct.CHUNK_OVERLAP,
-    #)
     text_splitter = CharacterTextSplitter(
         chunk_size=ct.CHUNK_SIZE,
         chunk_overlap=ct.CHUNK_OVERLAP,
         separator="\n",
     )
     splitted_docs = text_splitter.split_documents(docs_all)
+    
     # ✅ チャンク先頭にメタ情報を付加（retrieverと同じ処理）
     for doc in splitted_docs:
         file_name = doc.metadata.get("file_name", "不明")
@@ -434,11 +413,28 @@ def create_rag_chain(db_name):
 
     embeddings = OpenAIEmbeddings()
 
-    # すでに対象のデータベースが作成済みの場合は読み込み、未作成の場合は新規作成する
-    if os.path.isdir(db_name):
-        db = Chroma(persist_directory=".db", embedding_function=embeddings)
+    # Faissインデックスの作成（修正版）
+    base_path = f"{db_name}_faiss"
+    
+    # 再構築が必要かチェック
+    if should_rebuild_index(base_path, splitted_docs):
+        logger.info(f"🔨 Faissインデックスを構築中: {base_path}")
+        db = FAISS.from_documents(splitted_docs, embeddings)
+        
+        # Faiss専用の保存方法を使用
+        if save_faiss_index(db, base_path):
+            save_index_metadata(base_path, splitted_docs)
+        
     else:
-        db = Chroma.from_documents(splitted_docs, embedding=embeddings, persist_directory=".db")
+        # 既存のインデックスを読み込み
+        db = load_faiss_index(base_path, embeddings)
+        if db is None:
+            # 読み込み失敗時は再作成
+            logger.info("🔄 インデックス読み込み失敗、再作成します")
+            db = FAISS.from_documents(splitted_docs, embeddings)
+            if save_faiss_index(db, base_path):
+                save_index_metadata(base_path, splitted_docs)
+    
     retriever = db.as_retriever(search_kwargs={"k": ct.TOP_K})
 
     question_generator_template = ct.SYSTEM_PROMPT_CREATE_INDEPENDENT_TEXT
@@ -467,7 +463,76 @@ def create_rag_chain(db_name):
 
     return rag_chain
 
+def create_retriever(db_name):
+    """
+    指定されたDBパスに基づいてRetrieverのみを作成（Faiss修正版）
 
+    Args:
+        db_name: ベクトルDBの保存先ディレクトリ名（または定義名）
+
+    Returns:
+        LangChainのRetrieverオブジェクト
+    """
+    logger = logging.getLogger(ct.LOGGER_NAME)
+
+    docs_all = []
+    if db_name == ct.DB_ALL_PATH:
+        folders = os.listdir(ct.RAG_TOP_FOLDER_PATH)
+        for folder_path in folders:
+            if folder_path.startswith("."):
+                continue
+            add_docs(f"{ct.RAG_TOP_FOLDER_PATH}/{folder_path}", docs_all)
+    else:
+        folder_path = ct.DB_NAMES[db_name]
+        add_docs(folder_path, docs_all)
+
+    for doc in docs_all:
+        doc.page_content = adjust_string(doc.page_content)
+        for key in doc.metadata:
+            doc.metadata[key] = adjust_string(doc.metadata[key])
+
+    text_splitter = CharacterTextSplitter(
+        chunk_size=ct.CHUNK_SIZE,
+        chunk_overlap=ct.CHUNK_OVERLAP,
+        separator="\n",
+    )
+    splitted_docs = text_splitter.split_documents(docs_all)
+    embeddings = OpenAIEmbeddings()
+
+    # チャンク先頭にメタ情報を付加
+    for doc in splitted_docs:
+        file_name = doc.metadata.get("file_name", "不明")
+        category = doc.metadata.get("category", "不明")
+        heading = doc.metadata.get("first_heading", "")
+        keywords_str = doc.metadata.get("top_keywords", "")
+
+        # メタ情報を1行目に構造化（お好みで調整可能）
+        prefix = f"【カテゴリ: {category}】【ファイル名: {file_name}】"
+        if heading:
+            prefix += f"【見出し: {heading}】"
+        if keywords_str:  # ← 修正：文字列をそのまま使用
+            prefix += f"【キーワード: {keywords_str}】"
+
+        doc.page_content = prefix + "\n" + doc.page_content
+
+    # Faissインデックスの作成（修正版）
+    base_path = f"{db_name}_faiss"
+    
+    if should_rebuild_index(base_path, splitted_docs):
+        db = FAISS.from_documents(splitted_docs, embeddings)
+        if save_faiss_index(db, base_path):
+            save_index_metadata(base_path, splitted_docs)
+    else:
+        db = load_faiss_index(base_path, embeddings)
+        if db is None:
+            db = FAISS.from_documents(splitted_docs, embeddings)
+            if save_faiss_index(db, base_path):
+                save_index_metadata(base_path, splitted_docs)
+
+    retriever = db.as_retriever(search_kwargs={"k": ct.TOP_K})
+    return retriever
+
+# 以下、既存の関数群をそのまま維持...
 
 def add_docs(folder_path, docs_all):
     """
@@ -579,6 +644,7 @@ def add_docs(folder_path, docs_all):
 
         docs_all.extend(docs)
 
+# 既存の関数群を維持（run_company_doc_chain, run_service_doc_chain など）
 
 def run_company_doc_chain(param):
     """
@@ -727,9 +793,6 @@ def delete_old_conversation_log(result):
         # 過去の会話履歴の合計トークン数から、最も古い会話履歴のトークン数を引く
         st.session_state.total_tokens -= removed_tokens
 
-
-
-
 def notice_slack(chat_message):
     """
     問い合わせ内容のSlackへの通知
@@ -774,9 +837,9 @@ def notice_slack(chat_message):
     for doc in docs_all:
         docs_all_page_contents.append(doc.page_content)
 
-    # Retrieverの作成
+    # Retrieverの作成（Faiss版）
     embeddings = OpenAIEmbeddings()
-    db = Chroma.from_documents(docs_all, embedding=embeddings)
+    db = FAISS.from_documents(docs_all, embeddings)
     retriever = db.as_retriever(search_kwargs={"k": ct.TOP_K})
     bm25_retriever = BM25Retriever.from_texts(
         docs_all_page_contents,
@@ -833,7 +896,6 @@ def notice_slack(chat_message):
 
     return ct.CONTACT_THANKS_MESSAGE
 
-
 def adjust_reference_data(docs, docs_history):
     """
     Slack通知用の参照先データの整形
@@ -884,8 +946,6 @@ def adjust_reference_data(docs, docs_history):
     
     return docs_all
 
-
-
 def get_target_employees(employees, employee_ids):
     """
     問い合わせ内容と関連性が高い従業員情報一覧の取得
@@ -914,7 +974,6 @@ def get_target_employees(employees, employee_ids):
     
     return target_employees
 
-
 def get_slack_ids(target_employees):
     """
     SlackIDの一覧を取得
@@ -935,7 +994,6 @@ def get_slack_ids(target_employees):
     
     return slack_ids
 
-
 def create_slack_id_text(slack_ids):
     """
     SlackIDの一覧を取得
@@ -954,7 +1012,6 @@ def create_slack_id_text(slack_ids):
             slack_id_text += "と"
     
     return slack_id_text
-
 
 def get_context(docs):
     """
@@ -975,7 +1032,6 @@ def get_context(docs):
 
     return context
 
-
 def get_datetime():
     """
     現在日時を取得
@@ -988,7 +1044,6 @@ def get_datetime():
     now_datetime = dt_now.strftime('%Y年%m月%d日 %H:%M:%S')
 
     return now_datetime
-
 
 def preprocess_func(text):
     """
@@ -1007,7 +1062,6 @@ def preprocess_func(text):
     words = list(set(words))
 
     return words
-
 
 def adjust_string(s):
     """
@@ -1031,159 +1085,6 @@ def adjust_string(s):
     
     # OSがWindows以外の場合はそのまま返す
     return s
-
-def debug_retriever_with_keywords(query, retriever):
-    """
-    top_keywordsを含めた詳細なRetrieverデバッグ関数
-
-    Args:
-        query: ユーザーからの質問
-        retriever: LangChainのretrieverオブジェクト
-
-    Returns:
-        なし（コンソール出力）
-    """
-    logger = logging.getLogger(ct.LOGGER_NAME)
-    
-    print("\n" + "=" * 80)
-    print(f"🔍 質問: {query}")
-    print("=" * 80)
-
-    # クエリから名詞を抽出
-    try:
-        tokenizer_obj = dictionary.Dictionary().create()
-        mode = tokenizer.Tokenizer.SplitMode.C
-        tokens = tokenizer_obj.tokenize(query, mode)
-        query_nouns = set([
-            t.surface() 
-            for t in tokens
-            if "名詞" in t.part_of_speech() and len(t.surface()) > 1
-        ])
-        print(f"📝 抽出された名詞: {query_nouns}")
-    except Exception as e:
-        print(f"❌ 名詞抽出エラー: {e}")
-        query_nouns = set()
-
-    try:
-        # 通常の検索結果を取得
-        results = retriever.vectorstore.similarity_search_with_score(query, k=20)
-        
-        print(f"\n🔍 検索結果 (上位{len(results)}件):")
-        print("-" * 60)
-        
-        matching_docs = []
-        for i, (doc, score) in enumerate(results):
-            top_keywords_str = doc.metadata.get("top_keywords", "")
-            top_keywords = [kw.strip() for kw in top_keywords_str.split(" / ") if kw.strip()]
-            
-            # キーワードマッチをチェック
-            matched_keywords = [kw for kw in top_keywords if kw in query_nouns]
-            is_match = bool(matched_keywords)
-            
-            if is_match:
-                matching_docs.append((doc, score, matched_keywords))
-            
-            match_status = "✅ MATCH" if is_match else "❌ NO MATCH"
-            
-            print(f"[{i+1}] Score: {score:.4f} {match_status}")
-            print(f"    ファイル: {doc.metadata.get('file_name', '不明')}")
-            print(f"    カテゴリ: {doc.metadata.get('category', '不明')}")
-            print(f"    キーワード: {top_keywords}")
-            if matched_keywords:
-                print(f"    🎯 マッチしたキーワード: {matched_keywords}")
-            print(f"    内容: {doc.page_content[:150]}...")
-            print()
-        
-        print(f"\n📊 フィルター結果統計:")
-        print(f"   - 全体: {len(results)}件")
-        print(f"   - マッチ: {len(matching_docs)}件")
-        print(f"   - フィルター率: {len(matching_docs)/len(results)*100:.1f}%")
-        
-        # マッチした文書の詳細表示
-        if matching_docs:
-            print(f"\n🎯 top_keywordsでマッチした文書:")
-            print("-" * 60)
-            for i, (doc, score, matched_kw) in enumerate(matching_docs[:5]):
-                print(f"[マッチ{i+1}] Score: {score:.4f}")
-                print(f"    マッチキーワード: {matched_kw}")
-                print(f"    内容: {doc.page_content[:200]}...")
-                print()
-        
-    except Exception as e:
-        print(f"❌ 検索処理エラー: {e}")
-        # fallback処理
-        try:
-            docs = retriever.get_relevant_documents(query)
-            print(f"🔄 fallback検索結果: {len(docs)}件")
-            for i, doc in enumerate(docs[:3]):
-                print(f"[{i+1}] {doc.page_content[:100]}...")
-        except Exception as e2:
-            print(f"❌ fallback検索もエラー: {e2}")
-
-def create_retriever(db_name):
-    """
-    指定されたDBパスに基づいてRetrieverのみを作成
-
-    Args:
-        db_name: ベクトルDBの保存先ディレクトリ名（または定義名）
-
-    Returns:
-        LangChainのRetrieverオブジェクト
-    """
-    logger = logging.getLogger(ct.LOGGER_NAME)
-
-    docs_all = []
-    if db_name == ct.DB_ALL_PATH:
-        folders = os.listdir(ct.RAG_TOP_FOLDER_PATH)
-        for folder_path in folders:
-            if folder_path.startswith("."):
-                continue
-            add_docs(f"{ct.RAG_TOP_FOLDER_PATH}/{folder_path}", docs_all)
-    else:
-        folder_path = ct.DB_NAMES[db_name]
-        add_docs(folder_path, docs_all)
-
-    for doc in docs_all:
-        doc.page_content = adjust_string(doc.page_content)
-        for key in doc.metadata:
-            doc.metadata[key] = adjust_string(doc.metadata[key])
-
-    #text_splitter = RegexTextSplitter(
-    #separators=["\n\n", "\n", "● ", "○ ", "■ ", "【", "】", ".", "。", " "],
-    #chunk_size=ct.CHUNK_SIZE,
-    #chunk_overlap=ct.CHUNK_OVERLAP,
-    #)
-    text_splitter = CharacterTextSplitter(
-        chunk_size=ct.CHUNK_SIZE,
-        chunk_overlap=ct.CHUNK_OVERLAP,
-        separator="\n",
-    )
-    splitted_docs = text_splitter.split_documents(docs_all)
-    embeddings = OpenAIEmbeddings()
-
-    # チャンク先頭にメタ情報を付加
-    for doc in splitted_docs:
-        file_name = doc.metadata.get("file_name", "不明")
-        category = doc.metadata.get("category", "不明")
-        heading = doc.metadata.get("first_heading", "")
-        keywords_str = doc.metadata.get("top_keywords", "")
-
-        # メタ情報を1行目に構造化（お好みで調整可能）
-        prefix = f"【カテゴリ: {category}】【ファイル名: {file_name}】"
-    if heading:
-        prefix += f"【見出し: {heading}】"
-    if keywords_str:  # ← 修正：文字列をそのまま使用
-        prefix += f"【キーワード: {keywords_str}】"
-
-        doc.page_content = prefix + "\n" + doc.page_content
-
-    if os.path.isdir(db_name):
-        db = Chroma(persist_directory=".db", embedding_function=embeddings)
-    else:
-        db = Chroma.from_documents(splitted_docs, embedding=embeddings, persist_directory=".db")
-
-    retriever = db.as_retriever(search_kwargs={"k": ct.TOP_K})
-    return retriever
 
 def filter_chunks_by_top_keywords(docs, query):
     """
@@ -1363,9 +1264,6 @@ def test_keyword_filter():
         print(f"   - 通常検索: {len(original_docs)}件")
         print(f"   - フィルター後: {len(filtered_docs)}件")
         print(f"   - フィルター効果: {(1-len(filtered_docs)/len(original_docs))*100:.1f}%削減")
-        
-        # 詳細デバッグ
-        debug_retriever_with_keywords(query, retriever)
 
 def test_flexible_keyword_filter():
     """
@@ -1406,11 +1304,3 @@ def test_flexible_keyword_filter():
         print(f"   - 従来フィルター: {len(old_filtered_docs)}件")
         print(f"   - 柔軟フィルター: {len(new_filtered_docs)}件")
         print(f"   - 改善効果: {len(new_filtered_docs) - len(old_filtered_docs):+d}件")
-
-def debug_flexible_keyword_matching(query, retriever):
-    """
-    柔軟なキーワードマッチングのデバッグ関数
-    """
-    # 詳細なデバッグ情報を出力
-    # （詳細は省略、実装時に追加）
-    pass
