@@ -925,10 +925,7 @@ def adjust_reference_data(docs, docs_history):
             if row_history_dict["従業員ID"] == employee_id:
                 same_employee_inquiries.append(row_history_dict)
 
-        new_doc = Document()
-
         if same_employee_inquiries:
-            # 従業員情報と問い合わせ対応履歴の結合テキストを生成
             doc += "【従業員情報】\n"
             row_data = "\n".join(row_lines)
             doc += row_data + "\n=================================\n"
@@ -937,10 +934,10 @@ def adjust_reference_data(docs, docs_history):
                 for key, value in inquiry_dict.items():
                     doc += f"{key}: {value}\n"
                 doc += "---------------\n"
-            new_doc.page_content = doc
+
+            new_doc = Document(page_content=doc, metadata={})
         else:
-            new_doc.page_content = row.page_content
-        new_doc.metadata = {}
+            new_doc = Document(page_content=row.page_content, metadata={})
 
         docs_all.append(new_doc)
     
