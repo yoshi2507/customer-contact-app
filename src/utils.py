@@ -199,6 +199,41 @@ def save_index_metadata(base_path, docs):
 # 関数定義
 ############################################################
 
+def safe_get_secret(key):
+    """
+    環境変数またはStreamlit Secretsから安全に値を取得
+    
+    Args:
+        key: 環境変数名
+        
+    Returns:
+        値が存在する場合は値、存在しない場合はNone
+    """
+        
+    # まず環境変数から取得を試行
+    env_value = os.getenv(key)
+    if env_value:
+        return env_value
+    
+    # 環境変数にない場合、Streamlit Secretsから取得を試行
+    try:
+        return st.secrets.get(key)
+    except Exception:
+        # secrets.tomlが存在しない、またはキーが存在しない場合
+        return None
+
+def check_env_var_status(key):
+    """
+    環境変数の設定状況を文字列で返す（デバッグ用）
+    
+    Args:
+        key: 環境変数名
+        
+    Returns:
+        "設定済み" または "未設定"
+    """
+    return "設定済み" if safe_get_secret(key) else "未設定"
+
 def build_error_message(message):
     """
     エラーメッセージと管理者問い合わせテンプレートの連結
@@ -887,10 +922,16 @@ def notice_slack(chat_message):
 
     # Slack通知用のプロンプト生成
     prompt = PromptTemplate(
-        input_variables=["slack_id_text", "query", "context", "now_datetime"],
+        input_variables=["slack_id_text", "query", "context", "now_datetime", "user_email"],
         template=ct.SYSTEM_PROMPT_NOTICE_SLACK,
     )
-    prompt_message = prompt.format(slack_id_text=slack_id_text, query=chat_message, context=context, now_datetime=now_datetime)
+    prompt_message = prompt.format(
+        slack_id_text=slack_id_text, 
+        query=chat_message, 
+        context=context, 
+        now_datetime=now_datetime,
+        user_email=st.session_state.get("user_email","未入力")
+        )
 
     # Slack通知の実行
     agent_executor.invoke({"input": prompt_message})

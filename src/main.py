@@ -64,6 +64,14 @@ st.markdown(ct.STYLE, unsafe_allow_html=True)
 
 
 ############################################################
+# メールアドレス入力欄
+############################################################
+email = None
+if st.session_state.contact_mode == ct.CONTACT_MODE_ON:
+    email = st.text_input("ご連絡先メールアドレスを入力してください（必須）", key="user_email")
+
+
+############################################################
 # チャット入力の受け付け
 ############################################################
 chat_message = st.chat_input(ct.CHAT_INPUT_HELPER_TEXT)
@@ -84,6 +92,9 @@ except Exception as e:
 # チャット送信時の処理
 ############################################################
 if chat_message:
+    if st.session_state.contact_mode == ct.CONTACT_MODE_ON and not email:
+        st.error("お問い合わせを送信するには、メールアドレスを入力してください。")
+        st.stop()
     # ==========================================
     # 会話履歴の上限を超えた場合、受け付けない
     # ==========================================
@@ -116,12 +127,12 @@ if chat_message:
                 result = utils.execute_agent_or_chain(chat_message)
         else:
             with st.spinner(ct.SPINNER_CONTACT_TEXT):
-                # === 追加: デバッグ情報を標準出力に直接表示 ===
+                # === utils.py の関数を使用 ===
                 print(f"🔍 Slack通知モード開始: {chat_message}")
                 print(f"🔍 環境変数確認:")
-                print(f"  - SLACK_BOT_TOKEN: {'設定済み' if os.getenv('SLACK_BOT_TOKEN') or st.secrets.get('SLACK_BOT_TOKEN') else '未設定'}")
-                print(f"  - SLACK_USER_TOKEN: {'設定済み' if os.getenv('SLACK_USER_TOKEN') or st.secrets.get('SLACK_USER_TOKEN') else '未設定'}")
-                print(f"  - SERP_API_KEY: {'設定済み' if os.getenv('SERP_API_KEY') or st.secrets.get('SERP_API_KEY') else '未設定'}")
+                print(f"  - SLACK_BOT_TOKEN: {utils.check_env_var_status('SLACK_BOT_TOKEN')}")
+                print(f"  - SLACK_USER_TOKEN: {utils.check_env_var_status('SLACK_USER_TOKEN')}")
+                print(f"  - SERP_API_KEY: {utils.check_env_var_status('SERP_API_KEY')}")
                 
                 result = utils.notice_slack(chat_message)
                 print(f"🔍 Slack通知完了: {result}")
