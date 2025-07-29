@@ -47,6 +47,9 @@ from langchain_community.utilities import GoogleSearchAPIWrapper
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
 import traceback
+from langchain.callbacks.base import BaseCallbackHandler
+from typing import Any, Dict, List, Optional, Union
+
 
 # ============================================================================
 # 同義語辞書（必要に応じて拡張可能）
@@ -1675,12 +1678,9 @@ def filter_chunks_by_top_keywords(docs, query):
         logger.error(f"フィルタリング処理でエラーが発生: {e}")
         return docs  # エラー時は元のdocsを返す
 
-# utils.py の execute_agent_or_chain関数を以下で完全に置き換えてください
-# （行番号1620あたりから始まる既存の同名関数を削除して、この内容に差し替え）
-
 def execute_agent_or_chain(chat_message):
     """
-    AIエージェントもしくはAIエージェントなしのRAGのChainを実行（スピナー対応版）
+    AIエージェントもしくはAIエージェントなしのRAGのChainを実行（コールバックエラー修正版）
 
     Args:
         chat_message: ユーザーメッセージ
@@ -1690,11 +1690,10 @@ def execute_agent_or_chain(chat_message):
     """
     logger = logging.getLogger(ct.LOGGER_NAME)
 
-    # === 遅延初期化チェック（スピナー表示付き） ===
+    # === 遅延初期化チェック（既存のまま） ===
     if "agent_executor" not in st.session_state:
         logger.info("🔄 agent_executorが未初期化のため、遅延初期化を実行します")
         
-        # 初期化中のメッセージを表示
         init_placeholder = st.empty()
         with init_placeholder:
             st.info("🔄 初回アクセスのため、システムを初期化しています... （30-60秒程度お待ちください）")
@@ -1704,7 +1703,6 @@ def execute_agent_or_chain(chat_message):
             initialize_heavy_components()
             logger.info("✅ 遅延初期化が完了しました")
             
-            # 初期化完了メッセージ
             with init_placeholder:
                 st.success("✅ 初期化完了！回答を生成しています...")
                 
@@ -1714,7 +1712,6 @@ def execute_agent_or_chain(chat_message):
                 st.error("❌ 初期化に失敗しました")
             return "申し訳ございませんが、システムの初期化に失敗しました。ページを再読み込みしてください。"
         finally:
-            # メッセージを少し表示してからクリア
             import time
             time.sleep(1)
             init_placeholder.empty()
@@ -1726,55 +1723,85 @@ def execute_agent_or_chain(chat_message):
     # AIエージェント機能を利用する場合
     if st.session_state.agent_mode == ct.AI_AGENT_MODE_ON:
         logger.info("🤖 AIエージェントモードで実行")
-        st_callback = StreamlitCallbackHandler(st.container())
-        result = st.session_state.agent_executor.invoke({"input": chat_message}, {"callbacks": [st_callback]})
-        response = result["output"]
+        
+        try:
+            # === 修正: StreamlitCallbackHandlerの安全な使用 ===
+            # コンテナを事前に作成して、コールバック用の場所を確保
+            callback_container = st.container()
+            
+            # エラーハンドリング付きでCallbackHandlerを作成
+            try:
+                st_callback = StreamlitCallbackHandler(
+                    parent_container=callback_container,
+                    max_thought_containers=4,  # 思考過程の表示数を制限
+                    expand_new_thoughts=True,
+                    collapse_completed_thoughts=True
+                )
+                
+                # Agent実行
+                result = st.session_state.agent_executor.invoke(
+                    {"input": chat_message}, 
+                    {"callbacks": [st_callback]}
+                )
+                response = result["output"]
+                
+            except Exception as callback_error:
+                logger.warning(f"⚠️ StreamlitCallbackHandlerでエラー: {callback_error}")
+                logger.info("🔄 コールバックなしでAgent実行にフォールバック")
+                
+                # コールバックなしで再実行
+                result = st.session_state.agent_executor.invoke(
+                    {"input": chat_message},
+                    {"callbacks": []}  # 空のコールバック
+                )
+                response = result["output"]
+                
+                # 手動で思考過程を表示
+                with callback_container:
+                    st.info("🤖 AIエージェントが複数のツールを使用して回答を生成しました")
+                
+        except Exception as agent_error:
+            logger.error(f"❌ Agent実行でエラー: {agent_error}")
+            response = "申し訳ございませんが、AIエージェント処理でエラーが発生しました。通常モードで再試行してください。"
+            
     else:
+        # === 通常RAGモード（既存のまま） ===
         logger.info("🔍 通常RAGモードで実行 - 柔軟キーワードマッチング適用")
         
         try:
-            # 1. 通常のRetrieverで関連文書を取得
             retriever = create_retriever(ct.DB_ALL_PATH)
             original_docs = retriever.get_relevant_documents(chat_message)
             logger.info(f"📚 通常検索結果: {len(original_docs)}件")
 
-            # 2. 柔軟なキーワードマッチングを適用
             logger.info("🧠 柔軟なキーワードマッチングを開始")
             filtered_docs = filter_chunks_by_flexible_keywords(original_docs, chat_message)
             logger.info(f"✅ フィルター後: {len(filtered_docs)}件")
 
-            # 3. フィルター後の文書を使って手動でRAG処理を実行
             if filtered_docs:
                 logger.info("📖 フィルター後文書でRAG実行")
-                # フィルター後の文書からcontextを構築
                 context = "\n\n".join([doc.page_content for doc in filtered_docs[:ct.TOP_K]])
                 
-                # プロンプトを手動で構築してLLMに送信
                 question_answer_template = ct.SYSTEM_PROMPT_INQUIRY
                 messages = [
                     {"role": "system", "content": question_answer_template.format(context=context)},
                     {"role": "user", "content": chat_message}
                 ]
                 
-                # LLMに送信
                 response_obj = st.session_state.llm.invoke(messages)
                 response = response_obj.content if hasattr(response_obj, 'content') else str(response_obj)
                 logger.info("✅ カスタムRAG処理完了")
             else:
                 logger.info("⚠️ フィルター結果が空 - 通常RAGチェーンにフォールバック")
-                # rag_chainの存在チェック
                 if "rag_chain" not in st.session_state:
                     logger.warning("⚠️ rag_chainも未初期化です")
                     return "申し訳ございませんが、システムが完全に初期化されていません。ページを再読み込みしてください。"
                 
-                # フィルター結果が空の場合は通常のRAGを実行
                 result = st.session_state.rag_chain.invoke({
                     "input": chat_message,
                     "chat_history": st.session_state.chat_history
                 })
                 response = result["answer"]
 
-            # 会話履歴への追加
             st.session_state.chat_history.extend([
                 HumanMessage(content=chat_message),
                 AIMessage(content=response)
@@ -1785,7 +1812,6 @@ def execute_agent_or_chain(chat_message):
             import traceback
             logger.error(f"詳細エラー: {traceback.format_exc()}")
             
-            # エラー時のフォールバック
             try:
                 if "rag_chain" in st.session_state:
                     result = st.session_state.rag_chain.invoke({
