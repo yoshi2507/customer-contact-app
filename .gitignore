@@ -168,3 +168,4 @@ cython_debug/
 .db_service/
 .chroma/
 logs/
+secrets/

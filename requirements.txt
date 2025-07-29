@@ -149,3 +149,5 @@ zstandard==0.23.0
 sudachipy
 sudachidict_core
 faiss-cpu
+gspread
+oauth2client
