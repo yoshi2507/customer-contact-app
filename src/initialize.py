@@ -131,6 +131,15 @@ def initialize_agent_executor():
     st.session_state.manual_doc_chain = utils.create_rag_chain(ct.DB_MANUAL_PATH)
     st.session_state.policy_doc_chain = utils.create_rag_chain(ct.DB_POLICY_PATH)
     st.session_state.sustainability_doc_chain = utils.create_rag_chain(ct.DB_SUSTAINABILITY_PATH)
+
+    # ===== 🆕 ナレッジベース（スプレッドシート）のチェーン作成 =====
+    logger.info("📊 ナレッジベース（スプレッドシート）チェーンを作成中...")
+    st.session_state.knowledge_doc_chain = utils.create_knowledge_rag_chain()
+    if st.session_state.knowledge_doc_chain is None:
+        logger.warning("⚠️ ナレッジベースチェーンの作成に失敗しました")
+    else:
+        logger.info("✅ ナレッジベースチェーン作成完了")
+        
     retriever = utils.create_retriever(ct.DB_ALL_PATH)
     st.session_state.rag_chain = utils.create_rag_chain(ct.DB_ALL_PATH)
     logger.info("✅ RAGチェーン作成完了")

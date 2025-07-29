@@ -12,10 +12,11 @@ import streamlit as st
 import logging
 import sys
 import unicodedata
+import gspread
 from langchain_community.document_loaders import PyMuPDFLoader, Docx2txtLoader
 from langchain.text_splitter import CharacterTextSplitter
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder, PromptTemplate
-from langchain.schema import HumanMessage, AIMessage
+from langchain.schema import HumanMessage, AIMessage, Document
 from langchain_openai import OpenAIEmbeddings
 # ChromaDBの代わりにFaissを使用
 from langchain_community.vectorstores import FAISS
@@ -41,6 +42,11 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter as RegexTextS
 import pickle
 import hashlib
 import json
+from oauth2client.service_account import ServiceAccountCredentials
+from langchain_community.utilities import GoogleSearchAPIWrapper
+from slack_sdk import WebClient
+from slack_sdk.errors import SlackApiError
+import traceback
 
 # ============================================================================
 # 同義語辞書（必要に応じて拡張可能）
@@ -198,6 +204,175 @@ def save_index_metadata(base_path, docs):
 ############################################################
 # 関数定義
 ############################################################
+
+def build_knowledge_vectorstore():
+    """
+    スプレッドシートベースのベクトルDB構築（FAISS版）
+    """
+    logger = logging.getLogger(ct.LOGGER_NAME)
+    logger.info("🧱 スプレッドシートベースのベクトルDB構築開始")
+    
+    try:
+        # スプレッドシートからQ&Aデータを取得
+        docs = load_qa_from_google_sheet(ct.GOOGLE_SHEET_URL)
+        
+        if not docs:
+            logger.warning("⚠️ スプレッドシートからドキュメントが取得できませんでした")
+            return False
+        
+        # 埋め込みオブジェクトを作成
+        embeddings = OpenAIEmbeddings()
+        
+        # FAISSベクトルストアを作成
+        db = FAISS.from_documents(docs, embeddings)
+        
+        # ベクトルストアを保存
+        base_path = f"{ct.DB_KNOWLEDGE_PATH}_faiss"
+        success = save_faiss_index(db, base_path)
+        
+        if success:
+            # メタデータも保存
+            save_index_metadata(base_path, docs)
+            logger.info(f"✅ ベクトルDB構築完了: {len(docs)} docs → {base_path}")
+            return True
+        else:
+            logger.error("❌ ベクトルDB保存に失敗しました")
+            return False
+            
+    except Exception as e:
+        logger.error(f"❌ ベクトルDB構築中にエラー: {type(e).__name__} - {e}")
+        logger.error(f"詳細エラー: {traceback.format_exc()}")
+        return False
+
+def load_qa_from_google_sheet(sheet_url: str) -> List[Document]:
+    """
+    GoogleシートからQ&Aデータを読み込み（修正版）
+    
+    Args:
+        sheet_url: GoogleシートのURL
+        
+    Returns:
+        Documentオブジェクトのリスト
+    """
+    logger = logging.getLogger(ct.LOGGER_NAME)
+    logger.info("🔍 スプレッドシート読み込み開始")
+    
+    try:
+        # Google Sheets API認証
+        scope = [
+            "https://spreadsheets.google.com/feeds", 
+            "https://www.googleapis.com/auth/drive"
+        ]
+        
+        # 認証ファイルの存在確認
+        auth_file_path = 'secrets/service_account.json'
+        if not os.path.exists(auth_file_path):
+            logger.error(f"❌ 認証ファイルが見つかりません: {auth_file_path}")
+            return []
+        
+        creds = ServiceAccountCredentials.from_json_keyfile_name(auth_file_path, scope)
+        client = gspread.authorize(creds)
+        
+        # シートを開いてデータを取得
+        sheet = client.open_by_url(sheet_url).sheet1
+        rows = sheet.get_all_records()
+        
+        logger.info(f"📊 スプレッドシートから {len(rows)} 行のデータを取得")
+        
+    except Exception as e:
+        logger.error(f"❌ スプレッドシート読み込み失敗: {type(e).__name__} - {e}")
+        logger.error(f"詳細エラー: {traceback.format_exc()}")
+        return []
+
+    # ドキュメントオブジェクトの作成
+    docs = []
+    for i, row in enumerate(rows):
+        try:
+            # 各カラムからデータを取得（柔軟にフィールド名を処理）
+            q = row.get("質問", row.get("question", ""))
+            a = row.get("回答", row.get("answer", ""))
+            src = row.get("根拠資料", row.get("source", ""))
+            cat = row.get("対応カテゴリ", row.get("category", ""))
+            
+            # 必須フィールドのチェック
+            if not q or not a:
+                logger.warning(f"⚠️ {i+1}行目: 質問または回答が空です (Q='{q}', A='{a}')")
+                continue
+            
+            # メタデータの作成
+            meta = {
+                "file_name": "GoogleSheet",
+                "category": cat if cat else "一般",
+                "source": src if src else "社内Q&A",
+                "top_keywords": q,  # 質問をキーワードとして使用
+                "row_number": i + 1,
+                "sheet_url": sheet_url
+            }
+            
+            # コンテンツの作成
+            content = f"Q: {q}\nA: {a}"
+            if src:
+                content += f"\n根拠: {src}"
+            
+            # Documentオブジェクトを作成
+            doc = Document(page_content=content, metadata=meta)
+            docs.append(doc)
+            
+        except Exception as e:
+            logger.warning(f"⚠️ {i+1}行目のパース失敗: {type(e).__name__} - {e}")
+            continue
+    
+    logger.info(f"✅ {len(docs)}件の有効なDocumentを作成")
+    return docs
+
+def search_knowledge(query: str, top_k: int = 3, score_threshold: float = 0.3):
+    """
+    スプレッドシートベースの検索（FAISS版）
+    
+    Args:
+        query: 検索クエリ
+        top_k: 取得する最大件数
+        score_threshold: スコアの閾値
+        
+    Returns:
+        検索結果のDocumentリスト
+    """
+    logger = logging.getLogger(ct.LOGGER_NAME)
+    logger.info(f"🔎 スプレッドシートベースの検索開始：'{query}'")
+    
+    try:
+        # ナレッジベクトルストアの存在確認
+        if not hasattr(st.session_state, 'knowledge_doc_chain'):
+            logger.error("❌ knowledge_doc_chainが初期化されていません")
+            return []
+        
+        # 検索実行
+        retriever = st.session_state.knowledge_doc_chain.retriever
+        results = retriever.get_relevant_documents(query)
+        
+        if not results:
+            logger.info("🔸 検索結果：0件")
+            return []
+        
+        # スコアフィルタリング（FAISSの場合はスコアが取得できない場合があるため柔軟に処理）
+        filtered = []
+        for doc in results[:top_k]:  # まず上位top_k件に絞る
+            score = doc.metadata.get("score", 1.0)  # スコアがない場合は1.0とする
+            if score >= score_threshold:
+                filtered.append(doc)
+        
+        # フィルター結果が空の場合は上位結果をそのまま返す
+        if not filtered and results:
+            filtered = results[:top_k]
+            logger.info(f"🔸 スコアフィルター後が空のため、上位{len(filtered)}件を返します")
+        
+        logger.info(f"🔸 最終検索結果: {len(filtered)}件")
+        return filtered
+        
+    except Exception as e:
+        logger.error(f"❌ スプレッドシート検索中にエラー発生: {type(e).__name__} - {e}")
+        logger.error(f"詳細エラー: {traceback.format_exc()}")
+        return []
 
 def safe_get_secret(key):
     """
@@ -391,6 +566,64 @@ def filter_chunks_by_flexible_keywords(docs, query):
     except Exception as e:
         logger.error(f"❌ フィルタリング処理でエラーが発生: {e}")
         return docs  # エラー時も安全策として元のリストを返す
+
+def create_knowledge_rag_chain():
+    """
+    スプレッドシートベースのRAGチェーンを作成（FAISS版）
+    
+    Returns:
+        RAGチェーンオブジェクト
+    """
+    logger = logging.getLogger(ct.LOGGER_NAME)
+    logger.info("🔗 ナレッジRAGチェーン作成開始")
+    
+    try:
+        # FAISSベクトルストアを読み込み
+        embeddings = OpenAIEmbeddings()
+        base_path = f"{ct.DB_KNOWLEDGE_PATH}_faiss"
+        
+        # 既存のインデックスを読み込み
+        db = load_faiss_index(base_path, embeddings)
+        
+        if db is None:
+            logger.warning("⚠️ 既存のナレッジベクトルストアが見つかりません。新規作成します")
+            success = build_knowledge_vectorstore()
+            if not success:
+                logger.error("❌ ナレッジベクトルストアの作成に失敗しました")
+                return None
+            
+            # 作成後に再度読み込み
+            db = load_faiss_index(base_path, embeddings)
+            if db is None:
+                logger.error("❌ 作成したベクトルストアの読み込みに失敗しました")
+                return None
+        
+        # Retriever作成
+        retriever = db.as_retriever(search_kwargs={"k": ct.TOP_K})
+        
+        # RAGチェーン作成（簡易版）
+        question_answer_template = ct.SYSTEM_PROMPT_INQUIRY
+        question_answer_prompt = ChatPromptTemplate.from_messages([
+            ("system", question_answer_template),
+            ("human", "{input}")
+        ])
+        
+        # チェーン作成
+        question_answer_chain = create_stuff_documents_chain(
+            st.session_state.llm, 
+            question_answer_prompt
+        )
+        
+        rag_chain = create_retrieval_chain(retriever, question_answer_chain)
+        
+        logger.info("✅ ナレッジRAGチェーン作成完了")
+        return rag_chain
+        
+    except Exception as e:
+        logger.error(f"❌ ナレッジRAGチェーン作成エラー: {e}")
+        logger.error(f"詳細エラー: {traceback.format_exc()}")
+        return None
+
 
 def create_rag_chain(db_name):
     """
@@ -830,7 +1063,7 @@ def delete_old_conversation_log(result):
 
 def notice_slack(chat_message):
     """
-    問い合わせ内容のSlackへの通知
+    問い合わせ内容のSlackへの通知（修正版 - @channel対応）
 
     Args:
         chat_message: ユーザーメッセージ
@@ -838,105 +1071,357 @@ def notice_slack(chat_message):
     Returns:
         問い合わせサンクスメッセージ
     """
+    logger = logging.getLogger(ct.LOGGER_NAME)
+    logger.info("🚀 Slack通知処理を開始します")
 
-    # Slack通知用のAgent Executorを作成
-    toolkit = SlackToolkit()
-    tools = toolkit.get_tools()
-    agent_executor = initialize_agent(
-        llm=st.session_state.llm,
-        tools=tools,
-        agent=AgentType.STRUCTURED_CHAT_ZERO_SHOT_REACT_DESCRIPTION,
-        handle_parsing_errors=True
-    )
+    try:
+        # === Step 1: 担当者選定 ===
+        logger.info("👥 担当者選定を開始")
+        target_employees = select_responsible_employees(chat_message)
+        
+        # === Step 2: SlackID取得と通知対象の決定 ===
+        if target_employees:
+            # 適切な担当者が見つかった場合
+            slack_ids = get_slack_ids(target_employees)
+            slack_id_text = create_slack_id_text(slack_ids)
+            logger.info(f"📧 通知対象SlackID: {slack_id_text}")
+            notification_type = "specific_users"
+        else:
+            # 適切な担当者が見つからない場合は@channelで全員に通知
+            logger.warning("⚠️ 適切な担当者が見つかりませんでした。@channelで全員に通知します")
+            slack_id_text = "@channel"
+            notification_type = "channel_all"
 
-    # 担当者割り振りに使う用の「従業員情報」と「問い合わせ対応履歴」の読み込み
-    loader = CSVLoader(ct.EMPLOYEE_FILE_PATH, encoding=ct.CSV_ENCODING)
-    docs = loader.load()
-    loader = CSVLoader(ct.INQUIRY_HISTORY_FILE_PATH, encoding=ct.CSV_ENCODING)
-    docs_history = loader.load()
+        # === Step 3: 参考情報取得 ===
+        logger.info("📚 参考情報を取得中")
+        knowledge_context = get_knowledge_context_for_slack(chat_message)
 
-    # OSがWindowsの場合、Unicode正規化と、cp932（Windows用の文字コード）で表現できない文字を除去
-    for doc in docs:
-        doc.page_content = adjust_string(doc.page_content)
-        for key in doc.metadata:
-            doc.metadata[key] = adjust_string(doc.metadata[key])
-    for doc in docs_history:
-        doc.page_content = adjust_string(doc.page_content)
-        for key in doc.metadata:
-            doc.metadata[key] = adjust_string(doc.metadata[key])
+        # === Step 4: 現在日時取得 ===
+        now_datetime = get_datetime()
+        user_email = st.session_state.get("user_email", "未入力")
 
-    # 問い合わせ内容と関連性が高い従業員情報を取得するために、参照先データを整形
-    docs_all = adjust_reference_data(docs, docs_history)
-    
-    # 形態素解析による日本語の単語分割を行うため、参照先データからテキストのみを抽出
-    docs_all_page_contents = []
-    for doc in docs_all:
-        docs_all_page_contents.append(doc.page_content)
-
-    # Retrieverの作成（Faiss版）
-    embeddings = OpenAIEmbeddings()
-    db = FAISS.from_documents(docs_all, embeddings)
-    retriever = db.as_retriever(search_kwargs={"k": ct.TOP_K})
-    bm25_retriever = BM25Retriever.from_texts(
-        docs_all_page_contents,
-        preprocess_func=preprocess_func,
-        k=ct.TOP_K
-    )
-    retriever = EnsembleRetriever(
-        retrievers=[bm25_retriever, retriever],
-        weights=ct.RETRIEVER_WEIGHTS
-    )
-
-    # 問い合わせ内容と関連性の高い従業員情報を取得
-    employees = retriever.invoke(chat_message)
-    
-    # プロンプトに埋め込むための従業員情報テキストを取得
-    context = get_context(employees)
-
-    prompt_template = ChatPromptTemplate.from_messages([
-        ("system", ct.SYSTEM_PROMPT_EMPLOYEE_SELECTION)
-    ])
-    # フォーマット文字列を生成
-    output_parser = CommaSeparatedListOutputParser()
-    format_instruction = output_parser.get_format_instructions()
-
-    # 問い合わせ内容と関連性が高い従業員のID一覧を取得
-    messages = prompt_template.format_prompt(context=context, query=chat_message, format_instruction=format_instruction).to_messages()
-    employee_id_response = st.session_state.llm(messages)
-    employee_ids = output_parser.parse(employee_id_response.content)
-
-    # 問い合わせ内容と関連性が高い従業員情報を、IDで照合して取得
-    target_employees = get_target_employees(employees, employee_ids)
-    
-    # 問い合わせ内容と関連性が高い従業員情報の中から、SlackIDのみを抽出
-    slack_ids = get_slack_ids(target_employees)
-    
-    # 抽出したSlackIDの連結テキストを生成
-    slack_id_text = create_slack_id_text(slack_ids)
-    
-    # プロンプトに埋め込むための（問い合わせ内容と関連性が高い）従業員情報テキストを取得
-    context = get_context(target_employees)
-
-    # 現在日時を取得
-    now_datetime = get_datetime()
-
-    # Slack通知用のプロンプト生成
-    prompt = PromptTemplate(
-        input_variables=["slack_id_text", "query", "context", "now_datetime", "user_email"],
-        template=ct.SYSTEM_PROMPT_NOTICE_SLACK,
-    )
-    prompt_message = prompt.format(
-        slack_id_text=slack_id_text, 
-        query=chat_message, 
-        context=context, 
-        now_datetime=now_datetime,
-        user_email=st.session_state.get("user_email","未入力")
+        # === Step 5: Slackメッセージ生成 ===
+        logger.info("✍️ Slackメッセージを生成中")
+        slack_message = generate_slack_message_with_fallback(
+            slack_id_text, chat_message, knowledge_context, 
+            now_datetime, user_email, notification_type
         )
 
-    # Slack通知の実行
-    agent_executor.invoke({"input": prompt_message})
+        # === Step 6: Slack送信 ===
+        logger.info("📤 Slackにメッセージを送信中")
+        success = send_to_slack_channel(slack_message, "customer-contact2")
+        
+        if success:
+            logger.info("✅ Slack通知が正常に完了しました")
+            return ct.CONTACT_THANKS_MESSAGE
+        else:
+            logger.error("❌ Slack通知に失敗しました")
+            return "お問い合わせを受け付けましたが、システムエラーが発生しました。直接お電話でお問い合わせください。"
 
-    return ct.CONTACT_THANKS_MESSAGE
+    except Exception as e:
+        logger.error(f"❌ Slack通知処理でエラー発生: {e}")
+        logger.error(f"詳細エラー: {traceback.format_exc()}")
+        return "お問い合わせを受け付けましたが、システムエラーが発生しました。直接お電話でお問い合わせください。"
+
+
+def select_responsible_employees(chat_message):
+    """
+    問い合わせ内容に基づいて担当者を選定
+
+    Args:
+        chat_message: ユーザーメッセージ
+
+    Returns:
+        選定された担当者リスト
+    """
+    logger = logging.getLogger(ct.LOGGER_NAME)
+    
+    try:
+        # 従業員情報と履歴を読み込み
+        loader = CSVLoader(ct.EMPLOYEE_FILE_PATH, encoding=ct.CSV_ENCODING)
+        docs = loader.load()
+        loader = CSVLoader(ct.INQUIRY_HISTORY_FILE_PATH, encoding=ct.CSV_ENCODING)
+        docs_history = loader.load()
+
+        # データの正規化
+        for doc in docs:
+            doc.page_content = adjust_string(doc.page_content)
+            for key in doc.metadata:
+                doc.metadata[key] = adjust_string(doc.metadata[key])
+
+        for doc in docs_history:
+            doc.page_content = adjust_string(doc.page_content)
+            for key in doc.metadata:
+                doc.metadata[key] = adjust_string(doc.metadata[key])
+
+        # 参照データの整形
+        docs_all = adjust_reference_data(docs, docs_history)
+        
+        # Retrieverの作成（Faiss版）
+        docs_all_page_contents = [doc.page_content for doc in docs_all]
+        embeddings = OpenAIEmbeddings()
+        db = FAISS.from_documents(docs_all, embeddings)
+        retriever = db.as_retriever(search_kwargs={"k": ct.TOP_K})
+        
+        bm25_retriever = BM25Retriever.from_texts(
+            docs_all_page_contents,
+            preprocess_func=preprocess_func,
+            k=ct.TOP_K
+        )
+        
+        ensemble_retriever = EnsembleRetriever(
+            retrievers=[bm25_retriever, retriever],
+            weights=ct.RETRIEVER_WEIGHTS
+        )
+
+        # 関連性の高い従業員情報を取得
+        employees = ensemble_retriever.invoke(chat_message)
+        context = get_context(employees)
+
+        # 担当者ID選定のためのプロンプト実行
+        prompt_template = ChatPromptTemplate.from_messages([
+            ("system", ct.SYSTEM_PROMPT_EMPLOYEE_SELECTION)
+        ])
+        
+        output_parser = CommaSeparatedListOutputParser()
+        format_instruction = output_parser.get_format_instructions()
+
+        messages = prompt_template.format_prompt(
+            employee_context=context, 
+            query=chat_message, 
+            format_instruction=format_instruction
+        ).to_messages()
+        
+        employee_id_response = st.session_state.llm(messages)
+        employee_ids = output_parser.parse(employee_id_response.content)
+
+        # 選定された担当者情報を取得
+        target_employees = get_target_employees(employees, employee_ids)
+        
+        logger.info(f"👥 選定された担当者数: {len(target_employees)}")
+        return target_employees
+
+    except Exception as e:
+        logger.error(f"❌ 担当者選定でエラー: {e}")
+        return []
+
+def generate_slack_message_with_fallback(slack_id_text, query, knowledge_context, now_datetime, user_email, notification_type):
+    """
+    Slack用のメッセージを生成（@channel対応版）
+
+    Args:
+        slack_id_text: メンション対象のSlackID文字列 または "@channel"
+        query: 問い合わせ内容
+        knowledge_context: 参考情報
+        now_datetime: 現在日時
+        user_email: ユーザーメールアドレス
+        notification_type: "specific_users" または "channel_all"
+
+    Returns:
+        生成されたSlackメッセージ
+    """
+    logger = logging.getLogger(ct.LOGGER_NAME)
+    
+    try:
+        # 通知タイプに応じてプロンプトを調整
+        if notification_type == "channel_all":
+            # @channelの場合のプロンプト
+            template = ct.SYSTEM_PROMPT_NOTICE_SLACK_CHANNEL
+            
+            prompt = PromptTemplate(
+                input_variables=["query", "knowledge_context", "now_datetime", "user_email"],
+                template=template,
+            )
+            
+            prompt_message = prompt.format(
+                query=query,
+                knowledge_context=knowledge_context,
+                now_datetime=now_datetime,
+                user_email=user_email,
+                GOOGLE_SHEET_URL=ct.GOOGLE_SHEET_URL,
+                WEB_URL=ct.WEB_URL
+            )
+        else:
+            # 特定ユーザーの場合は既存のプロンプト
+            prompt = PromptTemplate(
+                input_variables=["slack_id_text", "query", "knowledge_context", "now_datetime", "user_email"],
+                template=ct.SYSTEM_PROMPT_NOTICE_SLACK,
+            )
+            
+            prompt_message = prompt.format(
+                slack_id_text=slack_id_text,
+                query=query,
+                knowledge_context=knowledge_context,
+                now_datetime=now_datetime,
+                user_email=user_email,
+                GOOGLE_SHEET_URL=ct.GOOGLE_SHEET_URL,
+                WEB_URL=ct.WEB_URL
+            )
+
+        # LLMでメッセージ生成
+        response = st.session_state.llm.invoke([{"role": "user", "content": prompt_message}])
+        generated_message = response.content if hasattr(response, 'content') else str(response)
+        
+        # @channelの場合は先頭に追加
+        if notification_type == "channel_all":
+            generated_message = f"@channel\n\n{generated_message}"
+        
+        logger.info("✅ Slackメッセージ生成完了")
+        return generated_message
+
+    except Exception as e:
+        logger.error(f"❌ メッセージ生成エラー: {e}")
+        # フォールバック用の簡単なメッセージ
+        if notification_type == "channel_all":
+            fallback_message = f"""
+@channel
+
+【緊急】適切な担当者が特定できない新しいお問い合わせが届きました。
+
+【問い合わせ内容】
+{query}
+
+【問い合わせ者メールアドレス】
+{user_email}
+
+【日時】
+{now_datetime}
+
+どなたか対応可能な方は、このメッセージにリアクションをお願いします。
+            """.strip()
+        else:
+            fallback_message = f"""
+新しいお問い合わせが届きました。
+
+【問い合わせ内容】
+{query}
+
+【問い合わせ者メールアドレス】
+{user_email}
+
+【日時】
+{now_datetime}
+
+担当者の皆様、対応をお願いいたします。
+            """.strip()
+        
+        return fallback_message
+
+
+def send_to_slack_channel(message, channel_name):
+    """
+    Slackチャンネルにメッセージを送信
+
+    Args:
+        message: 送信するメッセージ
+        channel_name: 送信先チャンネル名
+
+    Returns:
+        bool: 送信成功時True、失敗時False
+    """
+    logger = logging.getLogger(ct.LOGGER_NAME)
+    
+    try:
+        # Slack Bot Tokenを取得
+        bot_token = safe_get_secret("SLACK_BOT_TOKEN")
+        if not bot_token:
+            logger.error("❌ SLACK_BOT_TOKENが設定されていません")
+            return False
+
+        # Slack WebClient初期化
+        client = WebClient(token=bot_token)
+        
+        # チャンネルにメッセージ送信
+        response = client.chat_postMessage(
+            channel=f"#{channel_name}",
+            text=message,
+            username="問い合わせボット",
+            icon_emoji=":robot_face:"
+        )
+        
+        if response["ok"]:
+            logger.info(f"✅ Slack送信成功: チャンネル #{channel_name}")
+            return True
+        else:
+            logger.error(f"❌ Slack送信失敗: {response.get('error', '不明なエラー')}")
+            return False
+
+    except SlackApiError as e:
+        logger.error(f"❌ Slack API エラー: {e.response['error']}")
+        return False
+    except Exception as e:
+        logger.error(f"❌ Slack送信でエラー: {e}")
+        return False
+
+def get_knowledge_context_for_slack(chat_message):
+    """
+    Slack通知用の参考情報を取得（Google Sheets + Web検索）
+
+    Args:
+        chat_message: ユーザーメッセージ
+
+    Returns:
+        参考情報のテキスト
+    """
+    logger = logging.getLogger(ct.LOGGER_NAME)
+    knowledge_context = ""
+
+    try:
+        # === Google Sheets からQ&A取得 ===
+        logger.info("📊 Google Sheetsから情報取得中")
+        try:
+            scope = [
+                "https://spreadsheets.google.com/feeds",
+                "https://www.googleapis.com/auth/drive"
+            ]
+            creds = ServiceAccountCredentials.from_json_keyfile_name(
+                'secrets/service_account.json', scope
+            )
+            client = gspread.authorize(creds)
+            sheet = client.open_by_url(ct.GOOGLE_SHEET_URL).sheet1
+            rows = sheet.get_all_records()
+
+            sheets_context = "【Google Sheetsから取得した社内Q&A】\n"
+            for i, row in enumerate(rows[:10], 1):  # 最初の10件まで
+                q = row.get("質問", "")
+                a = row.get("回答", "")
+                source = row.get("根拠資料", "")
+                if q and a:
+                    sheets_context += f"{i}. Q: {q}\n   A: {a}\n"
+                    if source:
+                        sheets_context += f"   根拠: {source}\n"
+                    sheets_context += "\n"
+
+            knowledge_context += sheets_context + "\n" + "="*50 + "\n"
+            logger.info(f"✅ Google Sheets情報取得完了: {len(rows)}件")
+
+        except Exception as e:
+            logger.warning(f"⚠️ Google Sheets取得エラー: {e}")
+            knowledge_context += "【Google Sheets情報】取得に失敗しました。\n\n"
+
+        # === Web検索（pip-maker.com）===
+        logger.info("🌐 Web検索を実行中")
+        try:
+            search_wrapper = GoogleSearchAPIWrapper()
+            search_query = f"site:pip-maker.com {chat_message}"
+            web_results = search_wrapper.run(search_query)
+            
+            web_context = "【pip-maker.comからの検索結果】\n"
+            web_context += web_results[:1000] + "...\n\n"  # 最初の1000文字まで
+            
+            knowledge_context += web_context
+            logger.info("✅ Web検索完了")
+
+        except Exception as e:
+            logger.warning(f"⚠️ Web検索エラー: {e}")
+            knowledge_context += "【Web検索情報】取得に失敗しました。\n\n"
+
+        return knowledge_context
+
+    except Exception as e:
+        logger.error(f"❌ 参考情報取得でエラー: {e}")
+        return "参考情報の取得に失敗しました。"
+
 
 def adjust_reference_data(docs, docs_history):
     """

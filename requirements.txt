@@ -151,3 +151,5 @@ sudachidict_core
 faiss-cpu
 gspread
 oauth2client
+slack_sdk
+google-api-python-client
