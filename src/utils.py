@@ -1063,7 +1063,7 @@ def delete_old_conversation_log(result):
 
 def notice_slack(chat_message):
     """
-    問い合わせ内容のSlackへの通知（修正版 - @channel対応）
+    問い合わせ内容のSlackへの通知（最適化版）
 
     Args:
         chat_message: ユーザーメッセージ
@@ -1075,6 +1075,17 @@ def notice_slack(chat_message):
     logger.info("🚀 Slack通知処理を開始します")
 
     try:
+        # === 遅延初期化チェック（Slack用） ===
+        if "agent_executor" not in st.session_state:
+            logger.info("🔄 Slack処理のため遅延初期化を実行します")
+            try:
+                from initialize import initialize_heavy_components
+                with st.spinner("システム初期化中..."):
+                    initialize_heavy_components()
+            except Exception as init_error:
+                logger.error(f"❌ 遅延初期化に失敗: {init_error}")
+                return "お問い合わせを受け付けましたが、システムエラーが発生しました。直接お電話でお問い合わせください。"
+
         # === Step 1: 担当者選定 ===
         logger.info("👥 担当者選定を開始")
         target_employees = select_responsible_employees(chat_message)
@@ -1664,9 +1675,12 @@ def filter_chunks_by_top_keywords(docs, query):
         logger.error(f"フィルタリング処理でエラーが発生: {e}")
         return docs  # エラー時は元のdocsを返す
 
+# utils.py の execute_agent_or_chain関数を以下で完全に置き換えてください
+# （行番号1620あたりから始まる既存の同名関数を削除して、この内容に差し替え）
+
 def execute_agent_or_chain(chat_message):
     """
-    AIエージェントもしくはAIエージェントなしのRAGのChainを実行
+    AIエージェントもしくはAIエージェントなしのRAGのChainを実行（スピナー対応版）
 
     Args:
         chat_message: ユーザーメッセージ
@@ -1676,7 +1690,36 @@ def execute_agent_or_chain(chat_message):
     """
     logger = logging.getLogger(ct.LOGGER_NAME)
 
-    # === 追加: 実行モードの明確な記録 ===
+    # === 遅延初期化チェック（スピナー表示付き） ===
+    if "agent_executor" not in st.session_state:
+        logger.info("🔄 agent_executorが未初期化のため、遅延初期化を実行します")
+        
+        # 初期化中のメッセージを表示
+        init_placeholder = st.empty()
+        with init_placeholder:
+            st.info("🔄 初回アクセスのため、システムを初期化しています... （30-60秒程度お待ちください）")
+        
+        try:
+            from initialize import initialize_heavy_components
+            initialize_heavy_components()
+            logger.info("✅ 遅延初期化が完了しました")
+            
+            # 初期化完了メッセージ
+            with init_placeholder:
+                st.success("✅ 初期化完了！回答を生成しています...")
+                
+        except Exception as init_error:
+            logger.error(f"❌ 遅延初期化に失敗: {init_error}")
+            with init_placeholder:
+                st.error("❌ 初期化に失敗しました")
+            return "申し訳ございませんが、システムの初期化に失敗しました。ページを再読み込みしてください。"
+        finally:
+            # メッセージを少し表示してからクリア
+            import time
+            time.sleep(1)
+            init_placeholder.empty()
+
+    # === 実行モードの記録 ===
     logger.info(f"🎯 実行モード: {st.session_state.agent_mode}")
     logger.info(f"📝 入力メッセージ: {chat_message}")
 
@@ -1719,6 +1762,11 @@ def execute_agent_or_chain(chat_message):
                 logger.info("✅ カスタムRAG処理完了")
             else:
                 logger.info("⚠️ フィルター結果が空 - 通常RAGチェーンにフォールバック")
+                # rag_chainの存在チェック
+                if "rag_chain" not in st.session_state:
+                    logger.warning("⚠️ rag_chainも未初期化です")
+                    return "申し訳ございませんが、システムが完全に初期化されていません。ページを再読み込みしてください。"
+                
                 # フィルター結果が空の場合は通常のRAGを実行
                 result = st.session_state.rag_chain.invoke({
                     "input": chat_message,
@@ -1739,16 +1787,21 @@ def execute_agent_or_chain(chat_message):
             
             # エラー時のフォールバック
             try:
-                result = st.session_state.rag_chain.invoke({
-                    "input": chat_message,
-                    "chat_history": st.session_state.chat_history
-                })
-                response = result["answer"]
-                logger.info("🔄 フォールバック処理完了")
+                if "rag_chain" in st.session_state:
+                    result = st.session_state.rag_chain.invoke({
+                        "input": chat_message,
+                        "chat_history": st.session_state.chat_history
+                    })
+                    response = result["answer"]
+                    logger.info("🔄 フォールバック処理完了")
+                else:
+                    logger.error("❌ rag_chainも存在しないため、フォールバックも不可能")
+                    response = "申し訳ございませんが、現在システムに問題が発生しています。"
             except Exception as e2:
                 logger.error(f"❌ フォールバック処理もエラー: {e2}")
                 response = "申し訳ございませんが、現在システムに問題が発生しています。"
 
+    # フラグ設定
     if response != ct.NO_DOC_MATCH_MESSAGE:
         st.session_state.answer_flg = True
 
@@ -1828,3 +1881,62 @@ def test_flexible_keyword_filter():
         print(f"   - 従来フィルター: {len(old_filtered_docs)}件")
         print(f"   - 柔軟フィルター: {len(new_filtered_docs)}件")
         print(f"   - 改善効果: {len(new_filtered_docs) - len(old_filtered_docs):+d}件")
+        
+@st.cache_resource
+def create_cached_retriever(db_path):
+    """
+    キャッシュ機能付きのRetriever作成
+    
+    Args:
+        db_path: データベースパス
+        
+    Returns:
+        キャッシュされたRetrieverオブジェクト
+    """
+    logger = logging.getLogger(ct.LOGGER_NAME)
+    logger.info(f"🗃️ キャッシュ付きRetriever作成: {db_path}")
+    
+    return create_retriever(db_path)
+
+@st.cache_resource
+def create_cached_rag_chain(db_path):
+    """
+    キャッシュ機能付きのRAGチェーン作成
+    
+    Args:
+        db_path: データベースパス
+        
+    Returns:
+        キャッシュされたRAGチェーンオブジェクト
+    """
+    logger = logging.getLogger(ct.LOGGER_NAME)
+    logger.info(f"🔗 キャッシュ付きRAGチェーン作成: {db_path}")
+    
+    return create_rag_chain(db_path)
+
+def run_lightweight_debug():
+    """
+    軽量化されたデバッグ処理（起動時間短縮用）
+    """
+    logger = logging.getLogger(ct.LOGGER_NAME)
+    logger.info("🔧 軽量デバッグモード実行中...")
+    
+    try:
+        # 最小限のテストのみ実行
+        test_query = "受賞歴を教えてください"
+        
+        # 形態素解析のテスト
+        from sudachipy import tokenizer, dictionary
+        tokenizer_obj = dictionary.Dictionary().create()
+        mode = tokenizer.Tokenizer.SplitMode.C
+        tokens = tokenizer_obj.tokenize(test_query, mode)
+        nouns = [t.surface() for t in tokens if "名詞" in t.part_of_speech()]
+        
+        logger.info(f"🧪 軽量デバッグ完了: 抽出名詞 {nouns}")
+        
+        # フラグ設定
+        st.session_state.retriever_debug_done = True
+        st.session_state.flexible_keyword_debug_done = True
+        
+    except Exception as e:
+        logger.warning(f"⚠️ 軽量デバッグでエラー: {e}")
