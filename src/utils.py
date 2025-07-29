@@ -207,6 +207,91 @@ def save_index_metadata(base_path, docs):
 ############################################################
 # 関数定義
 ############################################################
+def create_base_vectorstore(db_name):
+    """
+    共通のベクトルストア作成処理
+    
+    Args:
+        db_name: ベクトルDBの保存先ディレクトリ名
+        
+    Returns:
+        FAISSベクトルストアオブジェクト
+    """
+    logger = logging.getLogger(ct.LOGGER_NAME)
+    logger.info(f"🔨 ベクトルストア作成開始: {db_name}")
+    
+    docs_all = []
+    
+    # AIエージェント機能を使わない場合の処理
+    if db_name == ct.DB_ALL_PATH:
+        folders = os.listdir(ct.RAG_TOP_FOLDER_PATH)
+        # 「data」フォルダ直下の各フォルダ名に対して処理
+        for folder_path in folders:
+            if folder_path.startswith("."):
+                continue
+            # フォルダ内の各ファイルのデータをリストに追加
+            add_docs(f"{ct.RAG_TOP_FOLDER_PATH}/{folder_path}", docs_all)
+    # AIエージェント機能を使う場合の処理
+    else:
+        # データベース名に対応した、RAG化対象のデータ群が格納されているフォルダパスを取得
+        folder_path = ct.DB_NAMES[db_name]
+        # フォルダ内の各ファイルのデータをリストに追加
+        add_docs(folder_path, docs_all)
+
+    # OSがWindowsの場合、Unicode正規化と、cp932（Windows用の文字コード）で表現できない文字を除去
+    for doc in docs_all:
+        doc.page_content = adjust_string(doc.page_content)
+        for key in doc.metadata:
+            doc.metadata[key] = adjust_string(doc.metadata[key])
+    
+    text_splitter = CharacterTextSplitter(
+        chunk_size=ct.CHUNK_SIZE,
+        chunk_overlap=ct.CHUNK_OVERLAP,
+        separator="\n",
+    )
+    splitted_docs = text_splitter.split_documents(docs_all)
+    
+    # ✅ チャンク先頭にメタ情報を付加（retrieverと同じ処理）
+    for doc in splitted_docs:
+        file_name = doc.metadata.get("file_name", "不明")
+        category = doc.metadata.get("category", "不明")
+        heading = doc.metadata.get("first_heading", "")
+        keywords_str = doc.metadata.get("top_keywords", "") 
+
+        prefix = f"【カテゴリ: {category}】【ファイル名: {file_name}】"
+        if heading:
+            prefix += f"【見出し: {heading}】"
+        if keywords_str:  # ← 修正：文字列をそのまま使用
+            prefix += f"【キーワード: {keywords_str}】"
+
+        doc.page_content = prefix + "\n" + doc.page_content
+
+    embeddings = OpenAIEmbeddings()
+
+    # Faissインデックスの作成（修正版）
+    base_path = f"{db_name}_faiss"
+    
+    # 再構築が必要かチェック
+    if should_rebuild_index(base_path, splitted_docs):
+        logger.info(f"🔨 Faissインデックスを構築中: {base_path}")
+        db = FAISS.from_documents(splitted_docs, embeddings)
+        
+        # Faiss専用の保存方法を使用
+        if save_faiss_index(db, base_path):
+            save_index_metadata(base_path, splitted_docs)
+        
+    else:
+        # 既存のインデックスを読み込み
+        db = load_faiss_index(base_path, embeddings)
+        if db is None:
+            # 読み込み失敗時は再作成
+            logger.info("🔄 インデックス読み込み失敗、再作成します")
+            db = FAISS.from_documents(splitted_docs, embeddings)
+            if save_faiss_index(db, base_path):
+                save_index_metadata(base_path, splitted_docs)
+    
+    logger.info(f"✅ ベクトルストア作成完了: {db_name}")
+    return db
 
 def build_knowledge_vectorstore():
     """
@@ -630,82 +715,19 @@ def create_knowledge_rag_chain():
 
 def create_rag_chain(db_name):
     """
-    引数として渡されたDB内を参照するRAGのChainを作成（Faiss修正版）
+    引数として渡されたDB内を参照するRAGのChainを作成（共通化版）
 
     Args:
         db_name: RAG化対象のデータを格納するデータベース名
+        
+    Returns:
+        RAGチェーンオブジェクト
     """
     logger = logging.getLogger(ct.LOGGER_NAME)
-
-    docs_all = []
-    # AIエージェント機能を使わない場合の処理
-    if db_name == ct.DB_ALL_PATH:
-        folders = os.listdir(ct.RAG_TOP_FOLDER_PATH)
-        # 「data」フォルダ直下の各フォルダ名に対して処理
-        for folder_path in folders:
-            if folder_path.startswith("."):
-                continue
-            # フォルダ内の各ファイルのデータをリストに追加
-            add_docs(f"{ct.RAG_TOP_FOLDER_PATH}/{folder_path}", docs_all)
-    # AIエージェント機能を使う場合の処理
-    else:
-        # データベース名に対応した、RAG化対象のデータ群が格納されているフォルダパスを取得
-        folder_path = ct.DB_NAMES[db_name]
-        # フォルダ内の各ファイルのデータをリストに追加
-        add_docs(folder_path, docs_all)
-
-    # OSがWindowsの場合、Unicode正規化と、cp932（Windows用の文字コード）で表現できない文字を除去
-    for doc in docs_all:
-        doc.page_content = adjust_string(doc.page_content)
-        for key in doc.metadata:
-            doc.metadata[key] = adjust_string(doc.metadata[key])
+    logger.info(f"🔗 RAGチェーン作成開始: {db_name}")
     
-    text_splitter = CharacterTextSplitter(
-        chunk_size=ct.CHUNK_SIZE,
-        chunk_overlap=ct.CHUNK_OVERLAP,
-        separator="\n",
-    )
-    splitted_docs = text_splitter.split_documents(docs_all)
-    
-    # ✅ チャンク先頭にメタ情報を付加（retrieverと同じ処理）
-    for doc in splitted_docs:
-        file_name = doc.metadata.get("file_name", "不明")
-        category = doc.metadata.get("category", "不明")
-        heading = doc.metadata.get("first_heading", "")
-        keywords_str = doc.metadata.get("top_keywords", "") 
-
-        prefix = f"【カテゴリ: {category}】【ファイル名: {file_name}】"
-        if heading:
-            prefix += f"【見出し: {heading}】"
-        if keywords_str:  # ← 修正：文字列をそのまま使用
-            prefix += f"【キーワード: {keywords_str}】"
-
-        doc.page_content = prefix + "\n" + doc.page_content
-
-    embeddings = OpenAIEmbeddings()
-
-    # Faissインデックスの作成（修正版）
-    base_path = f"{db_name}_faiss"
-    
-    # 再構築が必要かチェック
-    if should_rebuild_index(base_path, splitted_docs):
-        logger.info(f"🔨 Faissインデックスを構築中: {base_path}")
-        db = FAISS.from_documents(splitted_docs, embeddings)
-        
-        # Faiss専用の保存方法を使用
-        if save_faiss_index(db, base_path):
-            save_index_metadata(base_path, splitted_docs)
-        
-    else:
-        # 既存のインデックスを読み込み
-        db = load_faiss_index(base_path, embeddings)
-        if db is None:
-            # 読み込み失敗時は再作成
-            logger.info("🔄 インデックス読み込み失敗、再作成します")
-            db = FAISS.from_documents(splitted_docs, embeddings)
-            if save_faiss_index(db, base_path):
-                save_index_metadata(base_path, splitted_docs)
-    
+    # 共通のベクトルストア作成処理を使用
+    db = create_base_vectorstore(db_name)
     retriever = db.as_retriever(search_kwargs={"k": ct.TOP_K})
 
     question_generator_template = ct.SYSTEM_PROMPT_CREATE_INDEPENDENT_TEXT
@@ -732,11 +754,13 @@ def create_rag_chain(db_name):
     question_answer_chain = create_stuff_documents_chain(st.session_state.llm, question_answer_prompt)
     rag_chain = create_retrieval_chain(history_aware_retriever, question_answer_chain)
 
+    logger.info(f"✅ RAGチェーン作成完了: {db_name}")
     return rag_chain
+
 
 def create_retriever(db_name):
     """
-    指定されたDBパスに基づいてRetrieverのみを作成（Faiss修正版）
+    指定されたDBパスに基づいてRetrieverのみを作成（共通化版）
 
     Args:
         db_name: ベクトルDBの保存先ディレクトリ名（または定義名）
@@ -745,65 +769,14 @@ def create_retriever(db_name):
         LangChainのRetrieverオブジェクト
     """
     logger = logging.getLogger(ct.LOGGER_NAME)
-
-    docs_all = []
-    if db_name == ct.DB_ALL_PATH:
-        folders = os.listdir(ct.RAG_TOP_FOLDER_PATH)
-        for folder_path in folders:
-            if folder_path.startswith("."):
-                continue
-            add_docs(f"{ct.RAG_TOP_FOLDER_PATH}/{folder_path}", docs_all)
-    else:
-        folder_path = ct.DB_NAMES[db_name]
-        add_docs(folder_path, docs_all)
-
-    for doc in docs_all:
-        doc.page_content = adjust_string(doc.page_content)
-        for key in doc.metadata:
-            doc.metadata[key] = adjust_string(doc.metadata[key])
-
-    text_splitter = CharacterTextSplitter(
-        chunk_size=ct.CHUNK_SIZE,
-        chunk_overlap=ct.CHUNK_OVERLAP,
-        separator="\n",
-    )
-    splitted_docs = text_splitter.split_documents(docs_all)
-    embeddings = OpenAIEmbeddings()
-
-    # チャンク先頭にメタ情報を付加
-    for doc in splitted_docs:
-        file_name = doc.metadata.get("file_name", "不明")
-        category = doc.metadata.get("category", "不明")
-        heading = doc.metadata.get("first_heading", "")
-        keywords_str = doc.metadata.get("top_keywords", "")
-
-        # メタ情報を1行目に構造化（お好みで調整可能）
-        prefix = f"【カテゴリ: {category}】【ファイル名: {file_name}】"
-        if heading:
-            prefix += f"【見出し: {heading}】"
-        if keywords_str:  # ← 修正：文字列をそのまま使用
-            prefix += f"【キーワード: {keywords_str}】"
-
-        doc.page_content = prefix + "\n" + doc.page_content
-
-    # Faissインデックスの作成（修正版）
-    base_path = f"{db_name}_faiss"
+    logger.info(f"🔍 Retriever作成開始: {db_name}")
     
-    if should_rebuild_index(base_path, splitted_docs):
-        db = FAISS.from_documents(splitted_docs, embeddings)
-        if save_faiss_index(db, base_path):
-            save_index_metadata(base_path, splitted_docs)
-    else:
-        db = load_faiss_index(base_path, embeddings)
-        if db is None:
-            db = FAISS.from_documents(splitted_docs, embeddings)
-            if save_faiss_index(db, base_path):
-                save_index_metadata(base_path, splitted_docs)
+    # 共通のベクトルストア作成処理を使用
+    db = create_base_vectorstore(db_name)
 
     retriever = db.as_retriever(search_kwargs={"k": ct.TOP_K})
+    logger.info(f"✅ Retriever作成完了: {db_name}")
     return retriever
-
-# 以下、既存の関数群をそのまま維持...
 
 def add_docs(folder_path, docs_all):
     """
