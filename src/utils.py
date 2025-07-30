@@ -1727,9 +1727,16 @@ def execute_agent_or_chain(chat_message):
         logger.info("🔍 通常RAGモードで実行 - 柔軟キーワードマッチング適用")
         
         try:
-            retriever = create_retriever(ct.DB_ALL_PATH)
+            if "cached_retriever" not in st.session_state:
+                logger.info("🔄 初回実行のため、retrieverを作成・キャッシュします")
+                st.session_state.cached_retriever = create_retriever(ct.DB_ALL_PATH)
+                logger.info("✅ retrieverキャッシュ完了")
+            else:
+                logger.info("⚡ キャッシュされたretrieverを使用")
+
+            retriever = st.session_state.cached_retriever
             original_docs = retriever.get_relevant_documents(chat_message)
-            logger.info(f"📚 通常検索結果: {len(original_docs)}件")
+            logger.info(f"⚡ キャッシュ利用で高速検索完了: {len(original_docs)}件取得")
 
             logger.info("🧠 柔軟なキーワードマッチングを開始")
             filtered_docs = filter_chunks_by_flexible_keywords(original_docs, chat_message)

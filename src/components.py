@@ -54,6 +54,102 @@ def display_sidebar():
 
         st.markdown("**【問い合わせモードとは】**")
         st.code("問い合わせモードを「ON」にしてメッセージを送信すると、担当者に直接届きます。", wrap_lines=True)
+        st.divider()
+        
+        st.markdown("**【システム管理】**")
+        
+        # メモリ使用状況の表示
+        display_memory_usage()
+        
+        # セッションクリーンアップボタン
+        if st.button("🧹 セッションデータをクリア", help="メモリ使用量を削減するため、キャッシュされたデータを削除します"):
+            clear_session_cache()
+
+
+def display_memory_usage():
+    """
+    メモリ使用状況の表示
+    """
+    import logging
+    import constants as ct
+    
+    logger = logging.getLogger(ct.LOGGER_NAME)
+    
+    try:
+        # セッション状態のキャッシュ情報を取得
+        cache_info = []
+        
+        if "cached_retriever" in st.session_state:
+            cache_info.append("🔍 Retriever")
+        if "agent_executor" in st.session_state:
+            cache_info.append("🤖 Agent")
+        if "company_doc_chain" in st.session_state:
+            cache_info.append("🏢 Company")
+        if "service_doc_chain" in st.session_state:
+            cache_info.append("🛍️ Service")
+        if "customer_doc_chain" in st.session_state:
+            cache_info.append("👥 Customer")
+        if "manual_doc_chain" in st.session_state:
+            cache_info.append("📖 Manual")
+        if "policy_doc_chain" in st.session_state:
+            cache_info.append("📋 Policy")
+        if "sustainability_doc_chain" in st.session_state:
+            cache_info.append("🌱 Sustainability")
+        
+        if cache_info:
+            st.caption(f"💾 キャッシュ中: {', '.join(cache_info)}")
+        else:
+            st.caption("💾 キャッシュ: 未初期化")
+            
+    except Exception as e:
+        logger.warning(f"メモリ使用状況の表示でエラー: {e}")
+        st.caption("💾 キャッシュ: 情報取得エラー")
+
+
+def clear_session_cache():
+    """
+    セッションキャッシュのクリーンアップ
+    """
+    import logging
+    import constants as ct
+    
+    logger = logging.getLogger(ct.LOGGER_NAME)
+    
+    try:
+        # クリーンアップ対象のキー
+        cache_keys = [
+            "cached_retriever",
+            "agent_executor", 
+            "company_doc_chain",
+            "service_doc_chain",
+            "customer_doc_chain",
+            "manual_doc_chain",
+            "policy_doc_chain",
+            "sustainability_doc_chain",
+            "knowledge_doc_chain",
+            "rag_chain"
+        ]
+        
+        cleared_count = 0
+        for key in cache_keys:
+            if key in st.session_state:
+                del st.session_state[key]
+                cleared_count += 1
+        
+        if cleared_count > 0:
+            st.success(f"✅ {cleared_count}個のキャッシュをクリアしました")
+            logger.info(f"🧹 セッションキャッシュクリア完了: {cleared_count}個")
+            
+            # 遅延初期化フラグもリセット
+            st.session_state.lazy_init_required = True
+            
+            st.info("ℹ️ 次回の質問時に再初期化されます")
+        else:
+            st.info("ℹ️ クリアするキャッシュがありません")
+            
+    except Exception as e:
+        logger.error(f"❌ セッションキャッシュクリアでエラー: {e}")
+        st.error("セッションキャッシュのクリアに失敗しました")
 
 
 def display_initial_ai_message():
