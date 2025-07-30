@@ -293,6 +293,46 @@ def create_base_vectorstore(db_name):
     logger.info(f"✅ ベクトルストア作成完了: {db_name}")
     return db
 
+def run_doc_chain_base(chain_name, param):
+    """
+    共通のDocチェーン実行処理
+    
+    Args:
+        chain_name: チェーン名（例: "company", "service", "customer" など）
+        param: ユーザー入力値
+        
+    Returns:
+        LLMからの回答
+    """
+    logger = logging.getLogger(ct.LOGGER_NAME)
+    logger.info(f"🔗 {chain_name}チェーン実行開始")
+    
+    try:
+        # チェーン名から対応するsession_stateの属性を取得
+        # 例: chain_name="company" → st.session_state.company_doc_chain
+        chain_attr_name = f"{chain_name}_doc_chain"
+        chain = getattr(st.session_state, chain_attr_name)
+        
+        # チェーン実行
+        ai_msg = chain.invoke({
+            "input": param,
+            "chat_history": st.session_state.chat_history
+        })
+        
+        # 会話履歴への追加
+        st.session_state.chat_history.extend([
+            HumanMessage(content=param),
+            AIMessage(content=ai_msg["answer"])
+        ])
+        
+        logger.info(f"✅ {chain_name}チェーン実行完了")
+        return ai_msg["answer"]
+        
+    except Exception as e:
+        logger.error(f"❌ {chain_name}チェーン実行エラー: {e}")
+        # エラー時も安全に処理を継続
+        return f"申し訳ございませんが、{chain_name}に関する情報の取得でエラーが発生しました。"
+
 def build_knowledge_vectorstore():
     """
     スプレッドシートベースのベクトルDB構築（FAISS版）
@@ -888,8 +928,6 @@ def add_docs(folder_path, docs_all):
 
         docs_all.extend(docs)
 
-# 既存の関数群を維持（run_company_doc_chain, run_service_doc_chain など）
-
 def run_company_doc_chain(param):
     """
     会社に関するデータ参照に特化したTool設定用の関数
@@ -900,12 +938,7 @@ def run_company_doc_chain(param):
     Returns:
         LLMからの回答
     """
-    # 会社に関するデータ参照に特化したChainを実行してLLMからの回答取得
-    ai_msg = st.session_state.company_doc_chain.invoke({"input": param, "chat_history": st.session_state.chat_history})
-    # 会話履歴への追加
-    st.session_state.chat_history.extend([HumanMessage(content=param), AIMessage(content=ai_msg["answer"])])
-
-    return ai_msg["answer"]
+    return run_doc_chain_base("company", param)
 
 def run_service_doc_chain(param):
     """
@@ -917,13 +950,7 @@ def run_service_doc_chain(param):
     Returns:
         LLMからの回答
     """
-    # サービスに関するデータ参照に特化したChainを実行してLLMからの回答取得
-    ai_msg = st.session_state.service_doc_chain.invoke({"input": param, "chat_history": st.session_state.chat_history})
-
-    # 会話履歴への追加
-    st.session_state.chat_history.extend([HumanMessage(content=param), AIMessage(content=ai_msg["answer"])])
-
-    return ai_msg["answer"]
+    return run_doc_chain_base("service", param)
 
 def run_customer_doc_chain(param):
     """
@@ -935,13 +962,7 @@ def run_customer_doc_chain(param):
     Returns:
         LLMからの回答
     """
-    # 顧客とのやり取りに関するデータ参照に特化したChainを実行してLLMからの回答取得
-    ai_msg = st.session_state.customer_doc_chain.invoke({"input": param, "chat_history": st.session_state.chat_history})
-
-    # 会話履歴への追加
-    st.session_state.chat_history.extend([HumanMessage(content=param), AIMessage(content=ai_msg["answer"])])
-
-    return ai_msg["answer"]
+    return run_doc_chain_base("customer", param)
 
 def run_manual_doc_chain(param):
     """
@@ -953,19 +974,7 @@ def run_manual_doc_chain(param):
     Returns:
         LLMからの回答
     """
-    # RAG chainを使って回答を生成
-    ai_msg = st.session_state.manual_doc_chain.invoke({
-        "input": param,
-        "chat_history": st.session_state.chat_history
-    })
-
-    # 会話履歴に記録（オプション）
-    st.session_state.chat_history.extend([
-        HumanMessage(content=param),
-        AIMessage(content=ai_msg["answer"])
-    ])
-
-    return ai_msg["answer"]
+    return run_doc_chain_base("manual", param)
 
 def run_policy_doc_chain(param):
     """
@@ -977,19 +986,7 @@ def run_policy_doc_chain(param):
     Returns:
         LLMからの回答
     """
-    # RAG chainを使って回答を生成
-    ai_msg = st.session_state.policy_doc_chain.invoke({
-        "input": param,
-        "chat_history": st.session_state.chat_history
-    })
-
-    # 会話履歴に記録（オプション）
-    st.session_state.chat_history.extend([
-        HumanMessage(content=param),
-        AIMessage(content=ai_msg["answer"])
-    ])
-
-    return ai_msg["answer"]
+    return run_doc_chain_base("policy", param)
 
 
 def run_sustainability_doc_chain(param):
@@ -1002,19 +999,7 @@ def run_sustainability_doc_chain(param):
     Returns:
         LLMからの回答
     """
-    # RAG chainを使って回答を生成
-    ai_msg = st.session_state.sustainability_doc_chain.invoke({
-        "input": param,
-        "chat_history": st.session_state.chat_history
-    })
-
-    # 会話履歴に記録（オプション）
-    st.session_state.chat_history.extend([
-        HumanMessage(content=param),
-        AIMessage(content=ai_msg["answer"])
-    ])
-
-    return ai_msg["answer"]
+    return run_doc_chain_base("sustainability", param)
 
 def delete_old_conversation_log(result):
     """
