@@ -13,6 +13,38 @@ from langchain_community.document_loaders import PyMuPDFLoader, Docx2txtLoader, 
 ############################################################
 
 # ==========================================
+# 環境変数関連
+# ==========================================
+class EnvironmentKeys:
+    """環境変数キーの定数定義"""
+    
+    # OpenAI関連
+    OPENAI_API_KEY = "OPENAI_API_KEY"
+    
+    # Slack関連
+    SLACK_BOT_TOKEN = "SLACK_BOT_TOKEN"
+    SLACK_USER_TOKEN = "SLACK_USER_TOKEN"
+    
+    # 検索関連
+    SERP_API_KEY = "SERP_API_KEY"
+    
+    # Google関連
+    GOOGLE_APPLICATION_CREDENTIALS = "GOOGLE_APPLICATION_CREDENTIALS"
+
+# 必須環境変数のリスト
+REQUIRED_SECRETS = [
+    EnvironmentKeys.OPENAI_API_KEY,
+    EnvironmentKeys.SLACK_BOT_TOKEN,
+]
+
+# オプション環境変数のリスト
+OPTIONAL_SECRETS = [
+    EnvironmentKeys.SLACK_USER_TOKEN,
+    EnvironmentKeys.SERP_API_KEY,
+    EnvironmentKeys.GOOGLE_APPLICATION_CREDENTIALS,
+]
+
+# ==========================================
 # 画面表示系
 # ==========================================
 APP_NAME = "問い合わせ対応自動化AIエージェント"
@@ -407,6 +439,35 @@ MAIN_PROCESS_ERROR_MESSAGE = "ユーザー入力に対しての処理に失敗�
 DISP_ANSWER_ERROR_MESSAGE = "回答表示に失敗しました。"
 INPUT_TEXT_LIMIT_ERROR_MESSAGE = f"入力されたテキストの文字数が受付上限値（{MAX_ALLOWED_TOKENS}）を超えています。受付上限値を超えないよう、再度入力してください。"
 
+# 環境変数関連エラーメッセージ
+ENV_VALIDATION_ERROR_MESSAGE = "環境変数の設定に問題があります。必須の環境変数が不足している可能性があります。"
+OPENAI_API_KEY_ERROR_MESSAGE = "OpenAI APIキーが正しく設定されていません。OPENAI_API_KEYを確認してください。"
+SLACK_BOT_TOKEN_ERROR_MESSAGE = "Slack Bot Tokenが正しく設定されていません。SLACK_BOT_TOKENを確認してください。"
+SERP_API_KEY_ERROR_MESSAGE = "検索APIキーが設定されていません。Web検索機能を利用するにはSERP_API_KEYを設定してください。"
+GOOGLE_CREDENTIALS_ERROR_MESSAGE = "Google認証情報が設定されていません。スプレッドシート機能を使用するにはGOOGLE_APPLICATION_CREDENTIALSを設定してください。"
+
+# 環境変数設定ガイドメッセージ
+ENV_SETUP_GUIDE_MESSAGE = """
+環境変数の設定方法：
+
+1. .envファイルを作成し、以下の形式で設定してください：
+    OPENAI_API_KEY=sk-your-openai-api-key
+    SLACK_BOT_TOKEN=xoxb-your-slack-bot-token
+
+2. または、システムの環境変数として設定してください。
+
+3. 設定後、アプリケーションを再起動してください。
+"""
+
+# 環境変数設定チェック用メッセージ
+ENV_STATUS_MESSAGES = {
+    "required_missing": "❌ 必須環境変数が不足しています",
+    "required_complete": "✅ 必須環境変数が設定されています",
+    "optional_partial": "⚠️ 一部のオプション機能が利用できません",
+    "optional_complete": "✅ 全ての機能が利用可能です",
+    "validation_failed": "❌ 環境変数の検証に失敗しました",
+    "validation_success": "✅ 環境変数の検証が完了しました"
+}
 
 # ==========================================
 # スタイリング
@@ -433,3 +494,86 @@ STYLE = """
     }
 </style>
 """
+
+# ==========================================
+# 環境変数管理用ユーティリティ関数で使用する定数（新規追加）
+# ==========================================
+
+# 環境変数の分類
+ENV_CATEGORIES = {
+    "authentication": [EnvironmentKeys.OPENAI_API_KEY],
+    "communication": [EnvironmentKeys.SLACK_BOT_TOKEN, EnvironmentKeys.SLACK_USER_TOKEN],
+    "search": [EnvironmentKeys.SERP_API_KEY],
+    "integration": [EnvironmentKeys.GOOGLE_APPLICATION_CREDENTIALS]
+}
+
+# 環境変数の説明
+ENV_DESCRIPTIONS = {
+    EnvironmentKeys.OPENAI_API_KEY: {
+        "description": "OpenAI APIへのアクセスに必要なAPIキー",
+        "format": "sk-で始まる文字列",
+        "required": True,
+        "setup_url": "https://platform.openai.com/api-keys"
+    },
+    EnvironmentKeys.SLACK_BOT_TOKEN: {
+        "description": "SlackボットのBot User OAuth Token",
+        "format": "xoxb-で始まる文字列",
+        "required": True,
+        "setup_url": "https://api.slack.com/apps"
+    },
+    EnvironmentKeys.SLACK_USER_TOKEN: {
+        "description": "Slackユーザートークン（高度な機能用）",
+        "format": "xoxp-で始まる文字列",
+        "required": False,
+        "setup_url": "https://api.slack.com/apps"
+    },
+    EnvironmentKeys.SERP_API_KEY: {
+        "description": "SerpApi検索サービスのAPIキー",
+        "format": "英数字の文字列",
+        "required": False,
+        "setup_url": "https://serpapi.com/"
+    },
+    EnvironmentKeys.GOOGLE_APPLICATION_CREDENTIALS: {
+        "description": "Google Cloud認証情報ファイルのパス",
+        "format": "JSONファイルへのパス",
+        "required": False,
+        "setup_url": "https://cloud.google.com/docs/authentication"
+    }
+}
+
+# デフォルト設定値
+DEFAULT_ENV_VALUES = {
+    EnvironmentKeys.GOOGLE_APPLICATION_CREDENTIALS: "secrets/service_account.json"
+}
+
+# 環境変数検証ルール
+ENV_VALIDATION_RULES = {
+    EnvironmentKeys.OPENAI_API_KEY: {
+        "min_length": 40,
+        "prefix": "sk-",
+        "pattern": r"^sk-[a-zA-Z0-9]{48,}$"
+    },
+    EnvironmentKeys.SLACK_BOT_TOKEN: {
+        "min_length": 50,
+        "prefix": "xoxb-",
+        "pattern": r"^xoxb-[0-9]+-[0-9]+-[0-9]+-[a-zA-Z0-9]{24}$"
+    },
+    EnvironmentKeys.SLACK_USER_TOKEN: {
+        "min_length": 50,
+        "prefix": "xoxp-",
+        "pattern": r"^xoxp-[0-9]+-[0-9]+-[0-9]+-[a-zA-Z0-9]{64}$"
+    },
+    EnvironmentKeys.SERP_API_KEY: {
+        "min_length": 20,
+        "pattern": r"^[a-zA-Z0-9]{20,}$"
+    }
+}
+
+# 環境変数トラブルシューティングメッセージ
+ENV_TROUBLESHOOTING = {
+    "openai_format_error": "OpenAI APIキーは 'sk-' で始まる必要があります。正しいAPIキーを設定してください。",
+    "slack_format_error": "Slack Bot Tokenは 'xoxb-' で始まる必要があります。正しいBot Tokenを設定してください。",
+    "file_not_found": "指定されたファイルが見つかりません。ファイルパスが正しいか確認してください。",
+    "permission_denied": "ファイルへのアクセス権限がありません。ファイルの権限を確認してください。",
+    "json_invalid": "JSONファイルの形式が正しくありません。ファイルの内容を確認してください。"
+}

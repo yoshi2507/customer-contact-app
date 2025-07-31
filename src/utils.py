@@ -50,6 +50,15 @@ import traceback
 from langchain.callbacks.base import BaseCallbackHandler
 from typing import Any, Dict, List, Optional, Union
 
+# 環境変数管理統一対応
+from environment_manager import (
+    get_environment_manager,
+    safe_get_secret,
+    EnvironmentError,
+    EnvironmentKeys,
+    check_environment_health
+)
+
 # エラーハンドリング統一対応
 from error_handler import (
     error_handler,
@@ -382,7 +391,7 @@ def build_knowledge_vectorstore():
 
 def load_qa_from_google_sheet(sheet_url: str) -> List[Document]:
     """
-    GoogleシートからQ&Aデータを読み込み（修正版）
+    GoogleシートからQ&Aデータを読み込み（🔧 Google認証部分のみ修正）
     
     Args:
         sheet_url: GoogleシートのURL
@@ -400,8 +409,18 @@ def load_qa_from_google_sheet(sheet_url: str) -> List[Document]:
             "https://www.googleapis.com/auth/drive"
         ]
         
-        # 認証ファイルの存在確認
-        auth_file_path = 'secrets/service_account.json'
+        # 🔧 環境変数統一：認証ファイルパスの取得
+        env_manager = get_environment_manager()
+        try:
+            auth_file_path = env_manager.get_secret(
+                EnvironmentKeys.GOOGLE_APPLICATION_CREDENTIALS,
+                required=False,
+                default='secrets/service_account.json'
+            )
+        except EnvironmentError:
+            # フォールバック：デフォルトパス
+            auth_file_path = 'secrets/service_account.json'
+        
         if not os.path.exists(auth_file_path):
             logger.error(f"❌ 認証ファイルが見つかりません: {auth_file_path}")
             return []
@@ -420,7 +439,7 @@ def load_qa_from_google_sheet(sheet_url: str) -> List[Document]:
         logger.error(f"詳細エラー: {traceback.format_exc()}")
         return []
 
-    # ドキュメントオブジェクトの作成
+    # ドキュメントオブジェクトの作成（📝 修正不要）
     docs = []
     for i, row in enumerate(rows):
         try:
@@ -512,7 +531,7 @@ def search_knowledge(query: str, top_k: int = 3, score_threshold: float = 0.3):
 
 def safe_get_secret(key):
     """
-    環境変数またはStreamlit Secretsから安全に値を取得
+    環境変数またはStreamlit Secretsから安全に値を取得（🔧 統一版に置き換え）
     
     Args:
         key: 環境変数名
@@ -520,30 +539,32 @@ def safe_get_secret(key):
     Returns:
         値が存在する場合は値、存在しない場合はNone
     """
-        
-    # まず環境変数から取得を試行
-    env_value = os.getenv(key)
-    if env_value:
-        return env_value
-    
-    # 環境変数にない場合、Streamlit Secretsから取得を試行
+    env_manager = get_environment_manager()
     try:
-        return st.secrets.get(key)
-    except Exception:
-        # secrets.tomlが存在しない、またはキーが存在しない場合
+        return env_manager.get_secret(key, required=False)
+    except EnvironmentError:
         return None
 
 def check_env_var_status(key):
     """
-    環境変数の設定状況を文字列で返す（デバッグ用）
+    環境変数の設定状況を文字列で返す（🔧 統一版に置き換え）
     
     Args:
         key: 環境変数名
         
     Returns:
-        "設定済み" または "未設定"
+        "設定済み (****)" または "未設定"
     """
-    return "設定済み" if safe_get_secret(key) else "未設定"
+    env_manager = get_environment_manager()
+    try:
+        value = env_manager.get_secret(key, required=False, mask_in_logs=False)
+        if value:
+            masked = env_manager._mask_secret(value)
+            return f"設定済み ({masked})"
+        else:
+            return "未設定"
+    except Exception as e:
+        return f"エラー: {str(e)}"
 
 def build_error_message(message):
     """
@@ -1287,7 +1308,7 @@ def generate_slack_message_with_fallback(slack_id_text, query, knowledge_context
 )
 def send_to_slack_channel(message, channel_name):
     """
-    Slackチャンネルにメッセージを送信（エラーハンドリング統一版）
+    Slackチャンネルにメッセージを送信（🔧 環境変数統一版）
 
     Args:
         message: 送信するメッセージ
@@ -1298,10 +1319,16 @@ def send_to_slack_channel(message, channel_name):
     """
     logger = logging.getLogger(ct.LOGGER_NAME)
     
-    # Slack Bot Tokenを取得
-    bot_token = safe_get_secret("SLACK_BOT_TOKEN")
-    if not bot_token:
-        raise Exception("SLACK_BOT_TOKENが設定されていません")
+    # 🔧 環境変数統一：Slack Bot Tokenを取得
+    env_manager = get_environment_manager()
+    try:
+        bot_token = env_manager.get_secret(
+            EnvironmentKeys.SLACK_BOT_TOKEN,
+            required=True
+        )
+    except EnvironmentError as e:
+        logger.error(f"Slack Bot Token取得エラー: {e}")
+        raise Exception(f"SLACK_BOT_TOKENが設定されていません: {e}")
 
     # Slack WebClient初期化
     client = WebClient(token=bot_token)
@@ -1325,6 +1352,7 @@ def send_to_slack_channel(message, channel_name):
     level=ErrorLevel.WARNING,
     return_value=[]
 )
+
 def get_knowledge_context_for_slack(chat_message):
     """
     Slack通知用の参考情報を取得（Google Sheets + Web検索）（エラーハンドリング統一版）
@@ -1806,6 +1834,64 @@ def execute_agent_or_chain(chat_message):
 
     logger.info(f"📤 最終回答: {response[:100]}...")
     return response
+
+def get_environment_summary() -> dict:
+    """
+    環境変数の要約情報取得
+    
+    Returns:
+        環境変数の要約辞書
+    """
+    env_manager = get_environment_manager()
+    
+    return {
+        "status": env_manager.get_environment_status(),
+        "cache_stats": env_manager.get_cache_statistics(),
+        "health_check": check_environment_health()
+    }
+
+def cleanup_environment_cache():
+    """環境変数キャッシュのクリーンアップ"""
+    env_manager = get_environment_manager()
+    env_manager.cleanup_old_cache()
+    env_manager.clear_cache()
+
+def validate_environment_on_startup():
+    """
+    起動時の環境変数検証（🆕 新機能）
+    
+    Returns:
+        検証結果の辞書
+    """
+    logger = logging.getLogger(ct.LOGGER_NAME)
+    env_manager = get_environment_manager()
+    
+    logger.info("🔍 起動時環境変数検証開始")
+    
+    # 必須環境変数の検証
+    validation_result = env_manager.validate_required_secrets()
+    
+    # 検証結果のログ出力
+    for key, is_valid in validation_result.items():
+        status = "✅ OK" if is_valid else "❌ NG"
+        logger.info(f"  {key}: {status}")
+    
+    # オプション環境変数の状態確認
+    optional_status = {}
+    for key in ct.OPTIONAL_SECRETS:
+        try:
+            value = env_manager.get_secret(key, required=False)
+            optional_status[key] = bool(value)
+        except Exception:
+            optional_status[key] = False
+    
+    logger.info(f"🔍 オプション環境変数: {optional_status}")
+    
+    return {
+        "required": validation_result,
+        "optional": optional_status,
+        "all_valid": all(validation_result.values())
+    }
 
 def test_keyword_filter():
     """

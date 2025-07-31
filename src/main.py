@@ -14,6 +14,10 @@ from initialize import initialize
 import components as cn
 import constants as ct
 import os
+
+# 環境変数管理統一対応
+from environment_manager import get_environment_manager
+
 # エラーハンドリング統一対応
 from error_handler import (
     handle_initialization_error,
@@ -139,15 +143,20 @@ if chat_message:
                 result = utils.execute_agent_or_chain(chat_message)
         else:
             with st.spinner(ct.SPINNER_CONTACT_TEXT):
-                # === Debug出力（既存のまま保持） ===
-                print(f"🔍 Slack通知モード開始: {chat_message}")
-                print(f"🔍 環境変数確認:")
-                print(f"  - SLACK_BOT_TOKEN: {utils.check_env_var_status('SLACK_BOT_TOKEN')}")
-                print(f"  - SLACK_USER_TOKEN: {utils.check_env_var_status('SLACK_USER_TOKEN')}")
-                print(f"  - SERP_API_KEY: {utils.check_env_var_status('SERP_API_KEY')}")
+                # === 🔧 環境変数統一版のセキュアなDebug出力 ===
+                logger.info("🔔 Slack通知モード開始")
+                
+                # 環境変数状態の取得（マスク済み）
+                env_manager = get_environment_manager()
+                env_status = env_manager.get_environment_status(include_optional=True)
+                
+                # セキュアなログ出力
+                logger.info("📊 環境変数ステータス確認完了")
+                for key, status in env_status.items():
+                    logger.debug(f"  {key}: {status}")
                 
                 result = utils.notice_slack(chat_message)
-                print(f"🔍 Slack通知完了: {result}")
+                logger.info("✅ Slack通知処理完了")
     
     # ==========================================
     # 3. 古い会話履歴を削除
