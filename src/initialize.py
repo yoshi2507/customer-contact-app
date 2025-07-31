@@ -1,6 +1,6 @@
 """
 このファイルは、最初の画面読み込み時にのみ実行される初期化処理が記述されたファイルです。
-（起動時間短縮版）
+（起動時間短縮版 + エラーハンドリング統一適用版）
 """
 
 ############################################################
@@ -21,6 +21,15 @@ from langchain.agents import AgentType, initialize_agent
 import utils
 import constants as ct
 
+# エラーハンドリング統一対応
+from error_handler import (
+    ErrorHandlerContext,
+    ErrorContext,
+    ErrorLevel,
+    error_handler,
+    handle_data_processing_error
+)
+
 ############################################################
 # 設定関連
 ############################################################
@@ -32,7 +41,7 @@ load_dotenv()
 
 def initialize():
     """
-    画面読み込み時に実行する初期化処理（最適化版）
+    画面読み込み時に実行する初期化処理（最適化版 + エラーハンドリング統一版）
     """
     # 必須の初期化のみ実行
     initialize_session_state()
@@ -92,9 +101,13 @@ def initialize_logger():
     logger.setLevel(logging.INFO)
     logger.addHandler(log_handler)
 
+@error_handler(
+    context=ErrorContext.INITIALIZATION,
+    level=ErrorLevel.CRITICAL
+)
 def initialize_basic_components():
     """
-    基本コンポーネントのみ初期化（軽量）
+    基本コンポーネントのみ初期化（軽量）（エラーハンドリング統一版）
     """
     logger = logging.getLogger(ct.LOGGER_NAME)
     logger.info("🚀 基本コンポーネント初期化開始")
@@ -115,7 +128,7 @@ def initialize_basic_components():
 
 def initialize_heavy_components():
     """
-    重いコンポーネントの遅延初期化
+    重いコンポーネントの遅延初期化（エラーハンドリング統一版）
     """
     logger = logging.getLogger(ct.LOGGER_NAME)
     logger.info("🔄 重いコンポーネントの遅延初期化開始")
@@ -125,7 +138,12 @@ def initialize_heavy_components():
         logger.info("Agent Executorは既に初期化済みです")
         return
     
-    try:
+    # 統一エラーハンドラーのコンテキストマネージャーを使用
+    with ErrorHandlerContext(
+        context=ErrorContext.INITIALIZATION,
+        level=ErrorLevel.CRITICAL,
+        show_in_ui=False  # 初期化エラーは呼び出し元で制御
+    ):
         # RAGチェーン作成
         logger.info("📚 RAGチェーンを作成中...")
         st.session_state.customer_doc_chain = utils.create_rag_chain(ct.DB_CUSTOMER_PATH)
@@ -152,14 +170,14 @@ def initialize_heavy_components():
         # 遅延初期化完了フラグ
         st.session_state.lazy_init_required = False
         logger.info("✅ 重いコンポーネント初期化完了")
-        
-    except Exception as e:
-        logger.error(f"❌ 重いコンポーネント初期化エラー: {e}")
-        raise e
 
+@error_handler(
+    context=ErrorContext.DATA_PROCESSING,
+    level=ErrorLevel.WARNING
+)
 def run_debug_if_needed():
     """
-    デバッグ処理（軽量版）
+    デバッグ処理（軽量版）（エラーハンドリング統一版）
     """
     logger = logging.getLogger(ct.LOGGER_NAME)
     
@@ -175,14 +193,15 @@ def run_debug_if_needed():
         return
     
     # 軽量デバッグを実行
-    try:
-        utils.run_lightweight_debug()
-    except Exception as e:
-        logger.warning(f"⚠️ 軽量デバッグでエラー: {e}")
+    utils.run_lightweight_debug()
 
+@error_handler(
+    context=ErrorContext.INITIALIZATION,
+    level=ErrorLevel.CRITICAL
+)
 def create_agent_executor():
     """
-    Agent Executor作成
+    Agent Executor作成（エラーハンドリング統一版）
     """
     logger = logging.getLogger(ct.LOGGER_NAME)
     logger.info("🤖 Agent Executor作成中...")
@@ -249,9 +268,13 @@ def ensure_heavy_components_loaded():
     if st.session_state.get("lazy_init_required", True):
         initialize_heavy_components()
 
+@error_handler(
+    context=ErrorContext.INITIALIZATION,
+    level=ErrorLevel.WARNING
+)
 def force_initialize_if_needed():
     """
-    utils.pyから直接呼び出される場合の強制初期化
+    utils.pyから直接呼び出される場合の強制初期化（エラーハンドリング統一版）
     """
     if "agent_executor" not in st.session_state:
         initialize_heavy_components()

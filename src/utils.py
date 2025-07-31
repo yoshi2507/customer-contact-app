@@ -50,6 +50,17 @@ import traceback
 from langchain.callbacks.base import BaseCallbackHandler
 from typing import Any, Dict, List, Optional, Union
 
+# エラーハンドリング統一対応
+from error_handler import (
+    error_handler,
+    ErrorContext,
+    ErrorLevel,
+    handle_slack_error,
+    handle_rag_error,
+    handle_agent_error,
+    handle_data_processing_error,
+    UnifiedErrorHandler
+)
 
 # ============================================================================
 # 同義語辞書（必要に応じて拡張可能）
@@ -333,44 +344,41 @@ def run_doc_chain_base(chain_name, param):
         # エラー時も安全に処理を継続
         return f"申し訳ございませんが、{chain_name}に関する情報の取得でエラーが発生しました。"
 
+
+@error_handler(
+    context=ErrorContext.VECTORSTORE_CREATION,
+    return_value=None
+)
 def build_knowledge_vectorstore():
     """
-    スプレッドシートベースのベクトルDB構築（FAISS版）
+    スプレッドシートベースのベクトルDB構築（FAISS版）（エラーハンドリング統一版）
     """
     logger = logging.getLogger(ct.LOGGER_NAME)
     logger.info("🧱 スプレッドシートベースのベクトルDB構築開始")
     
-    try:
-        # スプレッドシートからQ&Aデータを取得
-        docs = load_qa_from_google_sheet(ct.GOOGLE_SHEET_URL)
-        
-        if not docs:
-            logger.warning("⚠️ スプレッドシートからドキュメントが取得できませんでした")
-            return False
-        
-        # 埋め込みオブジェクトを作成
-        embeddings = OpenAIEmbeddings()
-        
-        # FAISSベクトルストアを作成
-        db = FAISS.from_documents(docs, embeddings)
-        
-        # ベクトルストアを保存
-        base_path = f"{ct.DB_KNOWLEDGE_PATH}_faiss"
-        success = save_faiss_index(db, base_path)
-        
-        if success:
-            # メタデータも保存
-            save_index_metadata(base_path, docs)
-            logger.info(f"✅ ベクトルDB構築完了: {len(docs)} docs → {base_path}")
-            return True
-        else:
-            logger.error("❌ ベクトルDB保存に失敗しました")
-            return False
-            
-    except Exception as e:
-        logger.error(f"❌ ベクトルDB構築中にエラー: {type(e).__name__} - {e}")
-        logger.error(f"詳細エラー: {traceback.format_exc()}")
-        return False
+    # スプレッドシートからQ&Aデータを取得
+    docs = load_qa_from_google_sheet(ct.GOOGLE_SHEET_URL)
+    
+    if not docs:
+        raise Exception("スプレッドシートからドキュメントが取得できませんでした")
+    
+    # 埋め込みオブジェクトを作成
+    embeddings = OpenAIEmbeddings()
+    
+    # FAISSベクトルストアを作成
+    db = FAISS.from_documents(docs, embeddings)
+    
+    # ベクトルストアを保存
+    base_path = f"{ct.DB_KNOWLEDGE_PATH}_faiss"
+    success = save_faiss_index(db, base_path)
+    
+    if success:
+        # メタデータも保存
+        save_index_metadata(base_path, docs)
+        logger.info(f"✅ ベクトルDB構築完了: {len(docs)} docs → {base_path}")
+        return True
+    else:
+        raise Exception("ベクトルDB保存に失敗しました")
 
 def load_qa_from_google_sheet(sheet_url: str) -> List[Document]:
     """
@@ -1022,9 +1030,14 @@ def delete_old_conversation_log(result):
         # 過去の会話履歴の合計トークン数から、最も古い会話履歴のトークン数を引く
         st.session_state.total_tokens -= removed_tokens
 
+@error_handler(
+    context=ErrorContext.SLACK_NOTIFICATION,
+    return_value="お問い合わせを受け付けましたが、システムエラーが発生しました。直接お電話でお問い合わせください。"
+)
+
 def notice_slack(chat_message):
     """
-    問い合わせ内容のSlackへの通知（最適化版）
+    問い合わせ内容のSlackへの通知（エラーハンドリング統一版）
 
     Args:
         chat_message: ユーザーメッセージ
@@ -1035,70 +1048,63 @@ def notice_slack(chat_message):
     logger = logging.getLogger(ct.LOGGER_NAME)
     logger.info("🚀 Slack通知処理を開始します")
 
-    try:
-        # === 遅延初期化チェック（Slack用） ===
-        if "agent_executor" not in st.session_state:
-            logger.info("🔄 Slack処理のため遅延初期化を実行します")
-            try:
-                from initialize import initialize_heavy_components
-                with st.spinner("システム初期化中..."):
-                    initialize_heavy_components()
-            except Exception as init_error:
-                logger.error(f"❌ 遅延初期化に失敗: {init_error}")
-                return "お問い合わせを受け付けましたが、システムエラーが発生しました。直接お電話でお問い合わせください。"
+    # === 遅延初期化チェック（Slack用） ===
+    if "agent_executor" not in st.session_state:
+        logger.info("🔄 Slack処理のため遅延初期化を実行します")
+        from initialize import initialize_heavy_components
+        with st.spinner("システム初期化中..."):
+            initialize_heavy_components()
 
-        # === Step 1: 担当者選定 ===
-        logger.info("👥 担当者選定を開始")
-        target_employees = select_responsible_employees(chat_message)
-        
-        # === Step 2: SlackID取得と通知対象の決定 ===
-        if target_employees:
-            # 適切な担当者が見つかった場合
-            slack_ids = get_slack_ids(target_employees)
-            slack_id_text = create_slack_id_text(slack_ids)
-            logger.info(f"📧 通知対象SlackID: {slack_id_text}")
-            notification_type = "specific_users"
-        else:
-            # 適切な担当者が見つからない場合は@channelで全員に通知
-            logger.warning("⚠️ 適切な担当者が見つかりませんでした。@channelで全員に通知します")
-            slack_id_text = "@channel"
-            notification_type = "channel_all"
+    # === Step 1: 担当者選定 ===
+    logger.info("👥 担当者選定を開始")
+    target_employees = select_responsible_employees(chat_message)
+    
+    # === Step 2: SlackID取得と通知対象の決定 ===
+    if target_employees:
+        slack_ids = get_slack_ids(target_employees)
+        slack_id_text = create_slack_id_text(slack_ids)
+        logger.info(f"📧 通知対象SlackID: {slack_id_text}")
+        notification_type = "specific_users"
+    else:
+        logger.warning("⚠️ 適切な担当者が見つかりませんでした。@channelで全員に通知します")
+        slack_id_text = "@channel"
+        notification_type = "channel_all"
 
-        # === Step 3: 参考情報取得 ===
-        logger.info("📚 参考情報を取得中")
-        knowledge_context = get_knowledge_context_for_slack(chat_message)
+    # === Step 3: 参考情報取得 ===
+    logger.info("📚 参考情報を取得中")
+    knowledge_context = get_knowledge_context_for_slack(chat_message)
 
-        # === Step 4: 現在日時取得 ===
-        now_datetime = get_datetime()
-        user_email = st.session_state.get("user_email", "未入力")
+    # === Step 4: 現在日時取得 ===
+    now_datetime = get_datetime()
+    user_email = st.session_state.get("user_email", "未入力")
 
-        # === Step 5: Slackメッセージ生成 ===
-        logger.info("✍️ Slackメッセージを生成中")
-        slack_message = generate_slack_message_with_fallback(
-            slack_id_text, chat_message, knowledge_context, 
-            now_datetime, user_email, notification_type
-        )
+    # === Step 5: Slackメッセージ生成 ===
+    logger.info("✍️ Slackメッセージを生成中")
+    slack_message = generate_slack_message_with_fallback(
+        slack_id_text, chat_message, knowledge_context, 
+        now_datetime, user_email, notification_type
+    )
 
-        # === Step 6: Slack送信 ===
-        logger.info("📤 Slackにメッセージを送信中")
-        success = send_to_slack_channel(slack_message, "customer-contact2")
-        
-        if success:
-            logger.info("✅ Slack通知が正常に完了しました")
-            return ct.CONTACT_THANKS_MESSAGE
-        else:
-            logger.error("❌ Slack通知に失敗しました")
-            return "お問い合わせを受け付けましたが、システムエラーが発生しました。直接お電話でお問い合わせください。"
+    # === Step 6: Slack送信 ===
+    logger.info("📤 Slackにメッセージを送信中")
+    success = send_to_slack_channel(slack_message, "customer-contact2")
+    
+    if success:
+        logger.info("✅ Slack通知が正常に完了しました")
+        return ct.CONTACT_THANKS_MESSAGE
+    else:
+        # エラー時は例外を発生させてデコレーターに処理を委譲
+        raise Exception("Slack送信に失敗しました")
 
-    except Exception as e:
-        logger.error(f"❌ Slack通知処理でエラー発生: {e}")
-        logger.error(f"詳細エラー: {traceback.format_exc()}")
-        return "お問い合わせを受け付けましたが、システムエラーが発生しました。直接お電話でお問い合わせください。"
+@error_handler(
+    context=ErrorContext.DATA_PROCESSING,
+    return_value=[]
+)
 
 
 def select_responsible_employees(chat_message):
     """
-    問い合わせ内容に基づいて担当者を選定
+    問い合わせ内容に基づいて担当者を選定（エラーハンドリング統一版）
 
     Args:
         chat_message: ユーザーメッセージ
@@ -1108,74 +1114,69 @@ def select_responsible_employees(chat_message):
     """
     logger = logging.getLogger(ct.LOGGER_NAME)
     
-    try:
-        # 従業員情報と履歴を読み込み
-        loader = CSVLoader(ct.EMPLOYEE_FILE_PATH, encoding=ct.CSV_ENCODING)
-        docs = loader.load()
-        loader = CSVLoader(ct.INQUIRY_HISTORY_FILE_PATH, encoding=ct.CSV_ENCODING)
-        docs_history = loader.load()
+    # 従業員情報と履歴を読み込み
+    loader = CSVLoader(ct.EMPLOYEE_FILE_PATH, encoding=ct.CSV_ENCODING)
+    docs = loader.load()
+    loader = CSVLoader(ct.INQUIRY_HISTORY_FILE_PATH, encoding=ct.CSV_ENCODING)
+    docs_history = loader.load()
 
-        # データの正規化
-        for doc in docs:
-            doc.page_content = adjust_string(doc.page_content)
-            for key in doc.metadata:
-                doc.metadata[key] = adjust_string(doc.metadata[key])
+    # データの正規化
+    for doc in docs:
+        doc.page_content = adjust_string(doc.page_content)
+        for key in doc.metadata:
+            doc.metadata[key] = adjust_string(doc.metadata[key])
 
-        for doc in docs_history:
-            doc.page_content = adjust_string(doc.page_content)
-            for key in doc.metadata:
-                doc.metadata[key] = adjust_string(doc.metadata[key])
+    for doc in docs_history:
+        doc.page_content = adjust_string(doc.page_content)
+        for key in doc.metadata:
+            doc.metadata[key] = adjust_string(doc.metadata[key])
 
-        # 参照データの整形
-        docs_all = adjust_reference_data(docs, docs_history)
-        
-        # Retrieverの作成（Faiss版）
-        docs_all_page_contents = [doc.page_content for doc in docs_all]
-        embeddings = OpenAIEmbeddings()
-        db = FAISS.from_documents(docs_all, embeddings)
-        retriever = db.as_retriever(search_kwargs={"k": ct.TOP_K})
-        
-        bm25_retriever = BM25Retriever.from_texts(
-            docs_all_page_contents,
-            preprocess_func=preprocess_func,
-            k=ct.TOP_K
-        )
-        
-        ensemble_retriever = EnsembleRetriever(
-            retrievers=[bm25_retriever, retriever],
-            weights=ct.RETRIEVER_WEIGHTS
-        )
+    # 参照データの整形
+    docs_all = adjust_reference_data(docs, docs_history)
+    
+    # Retrieverの作成（Faiss版）
+    docs_all_page_contents = [doc.page_content for doc in docs_all]
+    embeddings = OpenAIEmbeddings()
+    db = FAISS.from_documents(docs_all, embeddings)
+    retriever = db.as_retriever(search_kwargs={"k": ct.TOP_K})
+    
+    bm25_retriever = BM25Retriever.from_texts(
+        docs_all_page_contents,
+        preprocess_func=preprocess_func,
+        k=ct.TOP_K
+    )
+    
+    ensemble_retriever = EnsembleRetriever(
+        retrievers=[bm25_retriever, retriever],
+        weights=ct.RETRIEVER_WEIGHTS
+    )
 
-        # 関連性の高い従業員情報を取得
-        employees = ensemble_retriever.invoke(chat_message)
-        context = get_context(employees)
+    # 関連性の高い従業員情報を取得
+    employees = ensemble_retriever.invoke(chat_message)
+    context = get_context(employees)
 
-        # 担当者ID選定のためのプロンプト実行
-        prompt_template = ChatPromptTemplate.from_messages([
-            ("system", ct.SYSTEM_PROMPT_EMPLOYEE_SELECTION)
-        ])
-        
-        output_parser = CommaSeparatedListOutputParser()
-        format_instruction = output_parser.get_format_instructions()
+    # 担当者ID選定のためのプロンプト実行
+    prompt_template = ChatPromptTemplate.from_messages([
+        ("system", ct.SYSTEM_PROMPT_EMPLOYEE_SELECTION)
+    ])
+    
+    output_parser = CommaSeparatedListOutputParser()
+    format_instruction = output_parser.get_format_instructions()
 
-        messages = prompt_template.format_prompt(
-            employee_context=context, 
-            query=chat_message, 
-            format_instruction=format_instruction
-        ).to_messages()
-        
-        employee_id_response = st.session_state.llm(messages)
-        employee_ids = output_parser.parse(employee_id_response.content)
+    messages = prompt_template.format_prompt(
+        employee_context=context, 
+        query=chat_message, 
+        format_instruction=format_instruction
+    ).to_messages()
+    
+    employee_id_response = st.session_state.llm(messages)
+    employee_ids = output_parser.parse(employee_id_response.content)
 
-        # 選定された担当者情報を取得
-        target_employees = get_target_employees(employees, employee_ids)
-        
-        logger.info(f"👥 選定された担当者数: {len(target_employees)}")
-        return target_employees
-
-    except Exception as e:
-        logger.error(f"❌ 担当者選定でエラー: {e}")
-        return []
+    # 選定された担当者情報を取得
+    target_employees = get_target_employees(employees, employee_ids)
+    
+    logger.info(f"👥 選定された担当者数: {len(target_employees)}")
+    return target_employees
 
 def generate_slack_message_with_fallback(slack_id_text, query, knowledge_context, now_datetime, user_email, notification_type):
     """
@@ -1280,9 +1281,13 @@ def generate_slack_message_with_fallback(slack_id_text, query, knowledge_context
         return fallback_message
 
 
+@error_handler(
+    context=ErrorContext.SLACK_NOTIFICATION,
+    return_value=False
+)
 def send_to_slack_channel(message, channel_name):
     """
-    Slackチャンネルにメッセージを送信
+    Slackチャンネルにメッセージを送信（エラーハンドリング統一版）
 
     Args:
         message: 送信するメッセージ
@@ -1293,41 +1298,36 @@ def send_to_slack_channel(message, channel_name):
     """
     logger = logging.getLogger(ct.LOGGER_NAME)
     
-    try:
-        # Slack Bot Tokenを取得
-        bot_token = safe_get_secret("SLACK_BOT_TOKEN")
-        if not bot_token:
-            logger.error("❌ SLACK_BOT_TOKENが設定されていません")
-            return False
+    # Slack Bot Tokenを取得
+    bot_token = safe_get_secret("SLACK_BOT_TOKEN")
+    if not bot_token:
+        raise Exception("SLACK_BOT_TOKENが設定されていません")
 
-        # Slack WebClient初期化
-        client = WebClient(token=bot_token)
-        
-        # チャンネルにメッセージ送信
-        response = client.chat_postMessage(
-            channel=f"#{channel_name}",
-            text=message,
-            username="問い合わせボット",
-            icon_emoji=":robot_face:"
-        )
-        
-        if response["ok"]:
-            logger.info(f"✅ Slack送信成功: チャンネル #{channel_name}")
-            return True
-        else:
-            logger.error(f"❌ Slack送信失敗: {response.get('error', '不明なエラー')}")
-            return False
+    # Slack WebClient初期化
+    client = WebClient(token=bot_token)
+    
+    # チャンネルにメッセージ送信
+    response = client.chat_postMessage(
+        channel=f"#{channel_name}",
+        text=message,
+        username="問い合わせボット",
+        icon_emoji=":robot_face:"
+    )
+    
+    if response["ok"]:
+        logger.info(f"✅ Slack送信成功: チャンネル #{channel_name}")
+        return True
+    else:
+        raise SlackApiError(f"Slack送信失敗: {response.get('error', '不明なエラー')}")
 
-    except SlackApiError as e:
-        logger.error(f"❌ Slack API エラー: {e.response['error']}")
-        return False
-    except Exception as e:
-        logger.error(f"❌ Slack送信でエラー: {e}")
-        return False
-
+@error_handler(
+    context=ErrorContext.DATA_PROCESSING,
+    level=ErrorLevel.WARNING,
+    return_value=[]
+)
 def get_knowledge_context_for_slack(chat_message):
     """
-    Slack通知用の参考情報を取得（Google Sheets + Web検索）
+    Slack通知用の参考情報を取得（Google Sheets + Web検索）（エラーハンドリング統一版）
 
     Args:
         chat_message: ユーザーメッセージ
@@ -1338,61 +1338,58 @@ def get_knowledge_context_for_slack(chat_message):
     logger = logging.getLogger(ct.LOGGER_NAME)
     knowledge_context = ""
 
+    # === Google Sheets からQ&A取得 ===
+    logger.info("📊 Google Sheetsから情報取得中")
     try:
-        # === Google Sheets からQ&A取得 ===
-        logger.info("📊 Google Sheetsから情報取得中")
-        try:
-            scope = [
-                "https://spreadsheets.google.com/feeds",
-                "https://www.googleapis.com/auth/drive"
-            ]
-            creds = ServiceAccountCredentials.from_json_keyfile_name(
-                'secrets/service_account.json', scope
-            )
-            client = gspread.authorize(creds)
-            sheet = client.open_by_url(ct.GOOGLE_SHEET_URL).sheet1
-            rows = sheet.get_all_records()
+        scope = [
+            "https://spreadsheets.google.com/feeds",
+            "https://www.googleapis.com/auth/drive"
+        ]
+        creds = ServiceAccountCredentials.from_json_keyfile_name(
+            'secrets/service_account.json', scope
+        )
+        client = gspread.authorize(creds)
+        sheet = client.open_by_url(ct.GOOGLE_SHEET_URL).sheet1
+        rows = sheet.get_all_records()
 
-            sheets_context = "【Google Sheetsから取得した社内Q&A】\n"
-            for i, row in enumerate(rows[:10], 1):  # 最初の10件まで
-                q = row.get("質問", "")
-                a = row.get("回答", "")
-                source = row.get("根拠資料", "")
-                if q and a:
-                    sheets_context += f"{i}. Q: {q}\n   A: {a}\n"
-                    if source:
-                        sheets_context += f"   根拠: {source}\n"
-                    sheets_context += "\n"
+        sheets_context = "【Google Sheetsから取得した社内Q&A】\n"
+        for i, row in enumerate(rows[:10], 1):  # 最初の10件まで
+            q = row.get("質問", "")
+            a = row.get("回答", "")
+            source = row.get("根拠資料", "")
+            if q and a:
+                sheets_context += f"{i}. Q: {q}\n   A: {a}\n"
+                if source:
+                    sheets_context += f"   根拠: {source}\n"
+                sheets_context += "\n"
 
-            knowledge_context += sheets_context + "\n" + "="*50 + "\n"
-            logger.info(f"✅ Google Sheets情報取得完了: {len(rows)}件")
+        knowledge_context += sheets_context + "\n" + "="*50 + "\n"
+        logger.info(f"✅ Google Sheets情報取得完了: {len(rows)}件")
 
-        except Exception as e:
-            logger.warning(f"⚠️ Google Sheets取得エラー: {e}")
-            knowledge_context += "【Google Sheets情報】取得に失敗しました。\n\n"
+    except Exception as sheets_error:
+        # Sheetsエラーは警告レベルで処理（処理続行）
+        logger.warning(f"⚠️ Google Sheets取得エラー: {sheets_error}")
+        knowledge_context += "【Google Sheets情報】取得に失敗しました。\n\n"
 
-        # === Web検索（pip-maker.com）===
-        logger.info("🌐 Web検索を実行中")
-        try:
-            search_wrapper = GoogleSearchAPIWrapper()
-            search_query = f"site:pip-maker.com {chat_message}"
-            web_results = search_wrapper.run(search_query)
-            
-            web_context = "【pip-maker.comからの検索結果】\n"
-            web_context += web_results[:1000] + "...\n\n"  # 最初の1000文字まで
-            
-            knowledge_context += web_context
-            logger.info("✅ Web検索完了")
+    # === Web検索（pip-maker.com）===
+    logger.info("🌐 Web検索を実行中")
+    try:
+        search_wrapper = GoogleSearchAPIWrapper()
+        search_query = f"site:pip-maker.com {chat_message}"
+        web_results = search_wrapper.run(search_query)
+        
+        web_context = "【pip-maker.comからの検索結果】\n"
+        web_context += web_results[:1000] + "...\n\n"  # 最初の1000文字まで
+        
+        knowledge_context += web_context
+        logger.info("✅ Web検索完了")
 
-        except Exception as e:
-            logger.warning(f"⚠️ Web検索エラー: {e}")
-            knowledge_context += "【Web検索情報】取得に失敗しました。\n\n"
+    except Exception as web_error:
+        # Web検索エラーも警告レベルで処理（処理続行）
+        logger.warning(f"⚠️ Web検索エラー: {web_error}")
+        knowledge_context += "【Web検索情報】取得に失敗しました。\n\n"
 
-        return knowledge_context
-
-    except Exception as e:
-        logger.error(f"❌ 参考情報取得でエラー: {e}")
-        return "参考情報の取得に失敗しました。"
+    return knowledge_context
 
 
 def adjust_reference_data(docs, docs_history):
@@ -1638,7 +1635,7 @@ def filter_chunks_by_top_keywords(docs, query):
 
 def execute_agent_or_chain(chat_message):
     """
-    AIエージェントもしくはAIエージェントなしのRAGのChainを実行（コールバックエラー修正版）
+    AIエージェントもしくはAIエージェントなしのRAGのChainを実行（エラーハンドリング統一版）
 
     Args:
         chat_message: ユーザーメッセージ
@@ -1647,6 +1644,7 @@ def execute_agent_or_chain(chat_message):
         LLMからの回答
     """
     logger = logging.getLogger(ct.LOGGER_NAME)
+    handler = UnifiedErrorHandler()
 
     # === 遅延初期化チェック（既存のまま） ===
     if "agent_executor" not in st.session_state:
@@ -1665,10 +1663,13 @@ def execute_agent_or_chain(chat_message):
                 st.success("✅ 初期化完了！回答を生成しています...")
                 
         except Exception as init_error:
-            logger.error(f"❌ 遅延初期化に失敗: {init_error}")
-            with init_placeholder:
-                st.error("❌ 初期化に失敗しました")
-            return "申し訳ございませんが、システムの初期化に失敗しました。ページを再読み込みしてください。"
+            # 初期化エラーを統一ハンドラーで処理
+            return handler.handle_error(
+                error=init_error,
+                context=ErrorContext.INITIALIZATION,
+                level=ErrorLevel.CRITICAL,
+                return_value="申し訳ございませんが、システムの初期化に失敗しました。ページを再読み込みしてください。"
+            )
         finally:
             import time
             time.sleep(1)
@@ -1683,15 +1684,13 @@ def execute_agent_or_chain(chat_message):
         logger.info("🤖 AIエージェントモードで実行")
         
         try:
-            # === 修正: StreamlitCallbackHandlerの安全な使用 ===
-            # コンテナを事前に作成して、コールバック用の場所を確保
+            # === StreamlitCallbackHandlerの安全な使用 ===
             callback_container = st.container()
             
-            # エラーハンドリング付きでCallbackHandlerを作成
             try:
                 st_callback = StreamlitCallbackHandler(
                     parent_container=callback_container,
-                    max_thought_containers=4,  # 思考過程の表示数を制限
+                    max_thought_containers=4,
                     expand_new_thoughts=True,
                     collapse_completed_thoughts=True
                 )
@@ -1710,7 +1709,7 @@ def execute_agent_or_chain(chat_message):
                 # コールバックなしで再実行
                 result = st.session_state.agent_executor.invoke(
                     {"input": chat_message},
-                    {"callbacks": []}  # 空のコールバック
+                    {"callbacks": []}
                 )
                 response = result["output"]
                 
@@ -1719,11 +1718,15 @@ def execute_agent_or_chain(chat_message):
                     st.info("🤖 AIエージェントが複数のツールを使用して回答を生成しました")
                 
         except Exception as agent_error:
-            logger.error(f"❌ Agent実行でエラー: {agent_error}")
-            response = "申し訳ございませんが、AIエージェント処理でエラーが発生しました。通常モードで再試行してください。"
+            # エージェントエラーを統一ハンドラーで処理
+            response = handler.handle_error(
+                error=agent_error,
+                context=ErrorContext.AGENT_EXECUTION,
+                return_value="申し訳ございませんが、AIエージェント処理でエラーが発生しました。通常モードで再試行してください。"
+            )
             
     else:
-        # === 通常RAGモード（既存のまま） ===
+        # === 通常RAGモード ===
         logger.info("🔍 通常RAGモードで実行 - 柔軟キーワードマッチング適用")
         
         try:
@@ -1759,7 +1762,7 @@ def execute_agent_or_chain(chat_message):
                 logger.info("⚠️ フィルター結果が空 - 通常RAGチェーンにフォールバック")
                 if "rag_chain" not in st.session_state:
                     logger.warning("⚠️ rag_chainも未初期化です")
-                    return "申し訳ございませんが、システムが完全に初期化されていません。ページを再読み込みしてください。"
+                    raise Exception("システムが完全に初期化されていません")
                 
                 result = st.session_state.rag_chain.invoke({
                     "input": chat_message,
@@ -1772,11 +1775,8 @@ def execute_agent_or_chain(chat_message):
                 AIMessage(content=response)
             ])
             
-        except Exception as e:
-            logger.error(f"❌ RAG処理でエラー発生: {e}")
-            import traceback
-            logger.error(f"詳細エラー: {traceback.format_exc()}")
-            
+        except Exception as rag_error:
+            # RAGエラーを統一ハンドラーで処理
             try:
                 if "rag_chain" in st.session_state:
                     result = st.session_state.rag_chain.invoke({
@@ -1786,11 +1786,19 @@ def execute_agent_or_chain(chat_message):
                     response = result["answer"]
                     logger.info("🔄 フォールバック処理完了")
                 else:
-                    logger.error("❌ rag_chainも存在しないため、フォールバックも不可能")
-                    response = "申し訳ございませんが、現在システムに問題が発生しています。"
-            except Exception as e2:
-                logger.error(f"❌ フォールバック処理もエラー: {e2}")
-                response = "申し訳ございませんが、現在システムに問題が発生しています。"
+                    raise Exception("rag_chainも存在しないため、フォールバックも不可能")
+            except Exception as fallback_error:
+                # フォールバックも失敗した場合
+                response = handler.handle_error(
+                    error=fallback_error,
+                    context=ErrorContext.RAG_CHAIN,
+                    return_value="申し訳ございませんが、現在システムに問題が発生しています。",
+                    additional_info={
+                        "original_error": str(rag_error),
+                        "fallback_failed": True,
+                        "query": chat_message
+                    }
+                )
 
     # フラグ設定
     if response != ct.NO_DOC_MATCH_MESSAGE:
@@ -1905,29 +1913,29 @@ def create_cached_rag_chain(db_path):
     
     return create_rag_chain(db_path)
 
+@error_handler(
+    context=ErrorContext.DATA_PROCESSING,
+    level=ErrorLevel.WARNING
+)
 def run_lightweight_debug():
     """
-    軽量化されたデバッグ処理（起動時間短縮用）
+    軽量化されたデバッグ処理（起動時間短縮用）（エラーハンドリング統一版）
     """
     logger = logging.getLogger(ct.LOGGER_NAME)
     logger.info("🔧 軽量デバッグモード実行中...")
     
-    try:
-        # 最小限のテストのみ実行
-        test_query = "受賞歴を教えてください"
-        
-        # 形態素解析のテスト
-        from sudachipy import tokenizer, dictionary
-        tokenizer_obj = dictionary.Dictionary().create()
-        mode = tokenizer.Tokenizer.SplitMode.C
-        tokens = tokenizer_obj.tokenize(test_query, mode)
-        nouns = [t.surface() for t in tokens if "名詞" in t.part_of_speech()]
-        
-        logger.info(f"🧪 軽量デバッグ完了: 抽出名詞 {nouns}")
-        
-        # フラグ設定
-        st.session_state.retriever_debug_done = True
-        st.session_state.flexible_keyword_debug_done = True
-        
-    except Exception as e:
-        logger.warning(f"⚠️ 軽量デバッグでエラー: {e}")
+    # 最小限のテストのみ実行
+    test_query = "受賞歴を教えてください"
+    
+    # 形態素解析のテスト
+    from sudachipy import tokenizer, dictionary
+    tokenizer_obj = dictionary.Dictionary().create()
+    mode = tokenizer.Tokenizer.SplitMode.C
+    tokens = tokenizer_obj.tokenize(test_query, mode)
+    nouns = [t.surface() for t in tokens if "名詞" in t.part_of_speech()]
+    
+    logger.info(f"🧪 軽量デバッグ完了: 抽出名詞 {nouns}")
+    
+    # フラグ設定
+    st.session_state.retriever_debug_done = True
+    st.session_state.flexible_keyword_debug_done = True

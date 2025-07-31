@@ -1,5 +1,6 @@
 """
 このファイルは、画面表示に特化した関数定義のファイルです。
+（エラーハンドリング統一適用版 - 重要な関数のみ）
 """
 
 ############################################################
@@ -9,6 +10,13 @@ import logging
 import streamlit as st
 import constants as ct
 
+# エラーハンドリング統一対応
+from error_handler import (
+    error_handler,
+    ErrorContext,
+    ErrorLevel,
+    ErrorHandlerContext
+)
 
 ############################################################
 # 関数定義
@@ -19,7 +27,6 @@ def display_app_title():
     タイトル表示
     """
     st.markdown(f"## {ct.APP_NAME}")
-
 
 def display_sidebar():
     """
@@ -65,92 +72,87 @@ def display_sidebar():
         if st.button("🧹 セッションデータをクリア", help="メモリ使用量を削減するため、キャッシュされたデータを削除します"):
             clear_session_cache()
 
-
+@error_handler(
+    context=ErrorContext.UI_DISPLAY,
+    level=ErrorLevel.WARNING
+)
 def display_memory_usage():
     """
-    メモリ使用状況の表示
+    メモリ使用状況の表示（エラーハンドリング統一版）
     """
     import logging
     import constants as ct
     
     logger = logging.getLogger(ct.LOGGER_NAME)
     
-    try:
-        # セッション状態のキャッシュ情報を取得
-        cache_info = []
-        
-        if "cached_retriever" in st.session_state:
-            cache_info.append("🔍 Retriever")
-        if "agent_executor" in st.session_state:
-            cache_info.append("🤖 Agent")
-        if "company_doc_chain" in st.session_state:
-            cache_info.append("🏢 Company")
-        if "service_doc_chain" in st.session_state:
-            cache_info.append("🛍️ Service")
-        if "customer_doc_chain" in st.session_state:
-            cache_info.append("👥 Customer")
-        if "manual_doc_chain" in st.session_state:
-            cache_info.append("📖 Manual")
-        if "policy_doc_chain" in st.session_state:
-            cache_info.append("📋 Policy")
-        if "sustainability_doc_chain" in st.session_state:
-            cache_info.append("🌱 Sustainability")
-        
-        if cache_info:
-            st.caption(f"💾 キャッシュ中: {', '.join(cache_info)}")
-        else:
-            st.caption("💾 キャッシュ: 未初期化")
-            
-    except Exception as e:
-        logger.warning(f"メモリ使用状況の表示でエラー: {e}")
-        st.caption("💾 キャッシュ: 情報取得エラー")
+    # セッション状態のキャッシュ情報を取得
+    cache_info = []
+    
+    if "cached_retriever" in st.session_state:
+        cache_info.append("🔍 Retriever")
+    if "agent_executor" in st.session_state:
+        cache_info.append("🤖 Agent")
+    if "company_doc_chain" in st.session_state:
+        cache_info.append("🏢 Company")
+    if "service_doc_chain" in st.session_state:
+        cache_info.append("🛍️ Service")
+    if "customer_doc_chain" in st.session_state:
+        cache_info.append("👥 Customer")
+    if "manual_doc_chain" in st.session_state:
+        cache_info.append("📖 Manual")
+    if "policy_doc_chain" in st.session_state:
+        cache_info.append("📋 Policy")
+    if "sustainability_doc_chain" in st.session_state:
+        cache_info.append("🌱 Sustainability")
+    
+    if cache_info:
+        st.caption(f"💾 キャッシュ中: {', '.join(cache_info)}")
+    else:
+        st.caption("💾 キャッシュ: 未初期化")
 
-
+@error_handler(
+    context=ErrorContext.UI_DISPLAY,
+    level=ErrorLevel.WARNING
+)
 def clear_session_cache():
     """
-    セッションキャッシュのクリーンアップ
+    セッションキャッシュのクリーンアップ（エラーハンドリング統一版）
     """
     import logging
     import constants as ct
     
     logger = logging.getLogger(ct.LOGGER_NAME)
     
-    try:
-        # クリーンアップ対象のキー
-        cache_keys = [
-            "cached_retriever",
-            "agent_executor", 
-            "company_doc_chain",
-            "service_doc_chain",
-            "customer_doc_chain",
-            "manual_doc_chain",
-            "policy_doc_chain",
-            "sustainability_doc_chain",
-            "knowledge_doc_chain",
-            "rag_chain"
-        ]
+    # クリーンアップ対象のキー
+    cache_keys = [
+        "cached_retriever",
+        "agent_executor", 
+        "company_doc_chain",
+        "service_doc_chain",
+        "customer_doc_chain",
+        "manual_doc_chain",
+        "policy_doc_chain",
+        "sustainability_doc_chain",
+        "knowledge_doc_chain",
+        "rag_chain"
+    ]
+    
+    cleared_count = 0
+    for key in cache_keys:
+        if key in st.session_state:
+            del st.session_state[key]
+            cleared_count += 1
+    
+    if cleared_count > 0:
+        st.success(f"✅ {cleared_count}個のキャッシュをクリアしました")
+        logger.info(f"🧹 セッションキャッシュクリア完了: {cleared_count}個")
         
-        cleared_count = 0
-        for key in cache_keys:
-            if key in st.session_state:
-                del st.session_state[key]
-                cleared_count += 1
+        # 遅延初期化フラグもリセット
+        st.session_state.lazy_init_required = True
         
-        if cleared_count > 0:
-            st.success(f"✅ {cleared_count}個のキャッシュをクリアしました")
-            logger.info(f"🧹 セッションキャッシュクリア完了: {cleared_count}個")
-            
-            # 遅延初期化フラグもリセット
-            st.session_state.lazy_init_required = True
-            
-            st.info("ℹ️ 次回の質問時に再初期化されます")
-        else:
-            st.info("ℹ️ クリアするキャッシュがありません")
-            
-    except Exception as e:
-        logger.error(f"❌ セッションキャッシュクリアでエラー: {e}")
-        st.error("セッションキャッシュのクリアに失敗しました")
-
+        st.info("ℹ️ 次回の質問時に再初期化されます")
+    else:
+        st.info("ℹ️ クリアするキャッシュがありません")
 
 def display_initial_ai_message():
     """
@@ -160,31 +162,40 @@ def display_initial_ai_message():
         st.success("こちらは弊社に関する質問にお答えする生成AIチャットボットです。AIエージェントの利用有無を選択し、画面下部のチャット欄から質問してください。")
         st.warning("具体的に入力したほうが期待通りの回答を得やすいです。", icon=ct.WARNING_ICON)
 
-
 def display_conversation_log(chat_message):
     """
-    会話ログの一覧表示
+    会話ログの一覧表示（エラーハンドリング統一版）
     """
-    # 会話ログの最後を表示する時のみ、フィードバック後のメッセージ表示するために「何番目のメッセージか」を取得
-    for index, message in enumerate(st.session_state.messages):
-        if message["role"] == "assistant":
-            with st.chat_message(message["role"], avatar=ct.AI_ICON_FILE_PATH):
-                st.markdown(message["content"])
-                # フィードバックエリアの表示
-                display_after_feedback_message(index, chat_message)
-        else:
-            with st.chat_message(message["role"], avatar=ct.USER_ICON_FILE_PATH):
-                st.markdown(message["content"])
-                # フィードバックエリアの表示
-                display_after_feedback_message(index, chat_message)
+    # 統一エラーハンドラーのコンテキストマネージャーを使用
+    with ErrorHandlerContext(
+        context=ErrorContext.UI_DISPLAY,
+        level=ErrorLevel.WARNING,
+        show_in_ui=False  # 個別エラーは表示しない（ログのみ）
+    ):
+        # 会話ログの最後を表示する時のみ、フィードバック後のメッセージ表示するために「何番目のメッセージか」を取得
+        for index, message in enumerate(st.session_state.messages):
+            if message["role"] == "assistant":
+                with st.chat_message(message["role"], avatar=ct.AI_ICON_FILE_PATH):
+                    st.markdown(message["content"])
+                    # フィードバックエリアの表示
+                    display_after_feedback_message(index, chat_message)
+            else:
+                with st.chat_message(message["role"], avatar=ct.USER_ICON_FILE_PATH):
+                    st.markdown(message["content"])
+                    # フィードバックエリアの表示
+                    display_after_feedback_message(index, chat_message)
 
-
+@error_handler(
+    context=ErrorContext.UI_DISPLAY,
+    level=ErrorLevel.WARNING
+)
 def display_after_feedback_message(index, chat_message):
     """
-    ユーザーフィードバック後のメッセージ表示
+    ユーザーフィードバック後のメッセージ表示（エラーハンドリング統一版）
 
     Args:
-        result: LLMからの回答
+        index: メッセージのインデックス
+        chat_message: チャットメッセージ
     """
     logger = logging.getLogger(ct.LOGGER_NAME)
 
@@ -218,21 +229,30 @@ def display_after_feedback_message(index, chat_message):
 
 def display_llm_response(result):
     """
-    LLMからの回答表示
+    LLMからの回答表示（エラーハンドリング統一版）
 
     Args:
         result: LLMからの回答
     """
-    st.markdown(result)
-    # フィードバックボタンを表示する場合のみ、メッセージ表示
-    if st.session_state.contact_mode == ct.CONTACT_MODE_OFF:
-        if st.session_state.answer_flg:
-            st.caption(ct.FEEDBACK_REQUIRE_MESSAGE)
+    # 統一エラーハンドラーのコンテキストマネージャーを使用
+    with ErrorHandlerContext(
+        context=ErrorContext.UI_DISPLAY,
+        level=ErrorLevel.WARNING,
+        show_in_ui=False  # マークダウン表示エラーは内部で処理
+    ):
+        st.markdown(result)
+        # フィードバックボタンを表示する場合のみ、メッセージ表示
+        if st.session_state.contact_mode == ct.CONTACT_MODE_OFF:
+            if st.session_state.answer_flg:
+                st.caption(ct.FEEDBACK_REQUIRE_MESSAGE)
 
-
+@error_handler(
+    context=ErrorContext.UI_DISPLAY,
+    level=ErrorLevel.WARNING
+)
 def display_feedback_button():
     """
-    フィードバックボタンの表示
+    フィードバックボタンの表示（エラーハンドリング統一版）
     """
     logger = logging.getLogger(ct.LOGGER_NAME)
 
